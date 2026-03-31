@@ -1,0 +1,4 @@
+routing:
+  aliases:
+    production-fast: "gemini/gemini-2.5-flash"
+    production-smart: "anthropic/claude-3-5-sonnet-20240620"
