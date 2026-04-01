@@ -1,0 +1,213 @@
+# ================================================================
+# Juggler LLM Gateway — Kubernetes Manifests
+# ================================================================
+# Assumes:
+#   - Managed Postgres, Redis, Kafka, ClickHouse (see env vars below)
+#   - Images pushed to your registry (e.g. ghcr.io/your-org/juggler-gateway:latest)
+#   - Secrets created via: kubectl create secret generic juggler-secrets --from-env-file=.env
+# ================================================================
+
+---
+# ── Namespace ───────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: juggler
+
+---
+# ── Secrets (create from .env file) ─────────────────────────────────────────
+# Run: kubectl create secret generic juggler-secrets \
+#        --from-literal=GEMINI_API_KEY=<key> \
+#        --from-literal=ANTHROPIC_API_KEY=<key> \
+#        --from-literal=DATABASE_URL=postgres://... \
+#        --from-literal=REDIS_URL=redis://... \
+#        --from-literal=ADMIN_API_KEY=<strong-secret> \
+#        -n juggler
+
+---
+# ── Gateway Deployment ───────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: juggler
+  labels:
+    app: gateway
+spec:
+  replicas: 3                          # scale this freely
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      containers:
+        - name: gateway
+          image: ghcr.io/grozafry/juggler-gateway:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: RUST_LOG
+              value: "info"
+            - name: MAX_DB_CONNECTIONS  # per pod; keep low with PgBouncer
+              value: "5"
+            - name: KAFKA_BROKERS
+              value: "your-kafka-broker:9092"  # replace with managed Kafka
+          envFrom:
+            - secretRef:
+                name: juggler-secrets
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "128Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      terminationGracePeriodSeconds: 30
+
+---
+# ── Gateway Service (internal ClusterIP + external LoadBalancer) ─────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: juggler
+spec:
+  selector:
+    app: gateway
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: LoadBalancer            # or ClusterIP + Ingress
+
+---
+# ── Gateway HPA (auto-scale 3→50 pods based on CPU) ─────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gateway-hpa
+  namespace: juggler
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: gateway
+  minReplicas: 3
+  maxReplicas: 50
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+
+---
+# ── Admin API Deployment ─────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admin
+  namespace: juggler
+  labels:
+    app: admin
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: admin
+  template:
+    metadata:
+      labels:
+        app: admin
+    spec:
+      containers:
+        - name: admin
+          image: ghcr.io/grozafry/juggler-admin:latest
+          ports:
+            - containerPort: 8081
+          env:
+            - name: CLICKHOUSE_ADDR
+              value: "your-clickhouse-host:9000"  # replace with managed CH
+            - name: CLICKHOUSE_USER
+              value: "juggler"
+          envFrom:
+            - secretRef:
+                name: juggler-secrets
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 15
+
+---
+# ── Admin Service ────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: admin
+  namespace: juggler
+spec:
+  selector:
+    app: admin
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8081
+  type: LoadBalancer            # or restrict to internal VPC only
+
+---
+# ── Optional: Ingress (if using nginx-ingress or similar) ───────────────────
+# apiVersion: networking.k8s.io/v1
+# kind: Ingress
+# metadata:
+#   name: juggler-ingress
+#   namespace: juggler
+#   annotations:
+#     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"  # SSE streams are long
+#     nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+# spec:
+#   rules:
+#     - host: gateway.your-company.com
+#       http:
+#         paths:
+#           - path: /
+#             pathType: Prefix
+#             backend:
+#               service:
+#                 name: gateway
+#                 port:
+#                   number: 80
+#     - host: admin.your-company.com
+#       http:
+#         paths:
+#           - path: /
+#             pathType: Prefix
+#             backend:
+#               service:
+#                 name: admin
+#                 port:
+#                   number: 80

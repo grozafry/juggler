@@ -64,11 +64,16 @@ async fn main() {
         });
 
     let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let max_db_conns: u32 = std::env::var("MAX_DB_CONNECTIONS")
+        .unwrap_or_else(|_| "5".to_string())
+        .parse()
+        .unwrap_or(5);
     let db_pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
+        .max_connections(max_db_conns)
         .connect(&db_url)
         .await
         .expect("Failed to connect to Postgres");
+    tracing::info!("Postgres pool ready (max_connections={})", max_db_conns);
 
     let auth_cache = std::sync::Arc::new(auth::cache::AuthCache::new());
     if let Err(e) = auth_cache.warm_up(&db_pool).await {
