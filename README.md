@@ -1,12 +1,131 @@
-# LLM Gateway
+# Juggler — LLM Gateway
 
-> Production-grade, in-house multi-provider LLM routing infrastructure.
-> **Core engine: Rust** · **Ancillary services: Go**
+> One OpenAI-compatible endpoint. All providers. Full observability. Zero key sprawl.
+> **Core engine: Rust** · **Admin API: Go** · **Deploys with a single command**
 
-[![CI](https://img.shields.io/badge/CI-passing-brightgreen)](#)
 [![License](https://img.shields.io/badge/license-MIT-blue)](#)
 [![Rust](https://img.shields.io/badge/rust-1.78%2B-orange)](https://www.rust-lang.org/)
 [![Go](https://img.shields.io/badge/go-1.22%2B-00ACD7)](https://golang.org/)
+
+---
+
+## Quick Start
+
+**Requirements:** Docker + Docker Compose. That's it.
+
+```bash
+# 1. Clone
+git clone https://github.com/grozafry/juggler && cd juggler
+
+# 2. Configure — add your provider API key(s)
+cp .env.example .env
+# Edit .env: set GEMINI_API_KEY and/or ANTHROPIC_API_KEY
+
+# 3. Start everything
+docker-compose up -d
+
+# 4. Open the dashboard
+open http://localhost:8081
+```
+
+That's it. The gateway is now live at `http://localhost:8080`.
+
+### Make your first request
+
+```bash
+# First: create a virtual key in the dashboard → Virtual Keys → Generate Key
+# Then use that key:
+
+curl -N -X POST http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer lgw_sk_<your-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "production-fast",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+### Point your existing app at Juggler
+
+Juggler is **OpenAI API-compatible**. If you're using the OpenAI SDK, just change the base URL:
+
+```python
+# Python (openai SDK)
+client = openai.OpenAI(
+    base_url="http://localhost:8080/v1",
+    api_key="lgw_sk_<your-virtual-key>"
+)
+```
+
+```typescript
+// TypeScript (openai SDK)
+const client = new OpenAI({
+  baseURL: "http://localhost:8080/v1",
+  apiKey: "lgw_sk_<your-virtual-key>",
+});
+```
+
+---
+
+## What You Get
+
+| Feature | Detail |
+|---|---|
+| **Virtual Keys** | Issue `lgw_sk_*` keys per team/app — real provider keys never leave the gateway |
+| **Multi-provider routing** | Gemini + Anthropic today, extensible. Weighted load balancing. |
+| **Circuit breakers** | Unhealthy providers are bypassed automatically |
+| **Auto retry** | Exponential backoff on 429 / 503 — transparent to callers |
+| **Cost tracking** | Per-request USD cost from provider pricing tables |
+| **Latency split** | TTFB (API processing time) vs. streaming time — know who's slow |
+| **Real token counts** | Input + output tokens from provider SSE events, not estimates |
+| **Audit trail** | Every request logged to ClickHouse via Kafka, queryable forever |
+| **Dashboard** | 7-page live dashboard — overview, latency, errors, providers, keys, logs |
+
+---
+
+## Services & Ports
+
+| Service | Port | Purpose |
+|---|---|---|
+| Gateway proxy | `8080` | OpenAI-compatible LLM endpoint |
+| Admin dashboard | `8081` | Metrics, virtual keys, audit logs |
+| Postgres | `5433` | Virtual keys + workspace auth |
+| Redpanda (Kafka) | `19092` | Audit log event bus |
+| ClickHouse | `9000` / `8123` | Analytics store |
+
+---
+
+## Admin API Auth
+
+Set `ADMIN_API_KEY` in your `.env`. All `/admin/v1/*` endpoints then require:
+
+```
+X-Admin-Key: <your-key>
+```
+
+If `ADMIN_API_KEY` is empty or `changeme`, auth is disabled (convenient for local dev).
+
+---
+
+## Model Routing
+
+Edit `config.yaml` to add or adjust routes:
+
+```yaml
+routes:
+  - alias: "production-fast"
+    provider: gemini
+    model: gemini-2.5-flash
+    weight: 80
+  - alias: "production-smart"
+    provider: anthropic
+    model: claude-3-5-sonnet-20241022
+    weight: 20
+```
+
+No gateway restart required — config is re-read on startup.
+
+---
 
 ---
 

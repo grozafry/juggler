@@ -1,6 +1,16 @@
 version: "3.8"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Juggler LLM Gateway — Full Stack
+# Run: docker-compose up -d
+# Dashboard: http://localhost:8081
+# Gateway:   http://localhost:8080/v1/chat/completions
+# ─────────────────────────────────────────────────────────────────────────────
+
 services:
+
+  # ── Infrastructure ──────────────────────────────────────────────────────────
+
   postgres:
     image: postgres:15-alpine
     container_name: gateway_db
@@ -16,7 +26,7 @@ services:
       test: ["CMD-SHELL", "pg_isready -U juggler -d gateway_auth"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   redis:
     image: redis:7-alpine
@@ -48,7 +58,7 @@ services:
       test: ["CMD-SHELL", "rpk cluster info"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.3
@@ -67,6 +77,60 @@ services:
     depends_on:
       redpanda:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user juggler --password password --query 'SELECT 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ── Application Services ────────────────────────────────────────────────────
+
+  gateway:
+    build:
+      context: .
+      dockerfile: crates/gateway-core/Dockerfile
+    container_name: gateway_proxy
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+      - KAFKA_BROKERS=redpanda:9092
+      - DATABASE_URL=postgres://juggler:password@postgres:5432/gateway_auth
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  admin:
+    build:
+      context: .
+      dockerfile: services/admin-api/Dockerfile
+    container_name: gateway_admin
+    ports:
+      - "8081:8081"
+    environment:
+      - CLICKHOUSE_ADDR=gateway_clickhouse:9000
+      - CLICKHOUSE_USER=juggler
+      - CLICKHOUSE_PASSWORD=password
+      - DATABASE_URL=postgres://juggler:password@postgres:5432/gateway_auth
+      - ADMIN_API_KEY=${ADMIN_API_KEY:-changeme}
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   pgdata:

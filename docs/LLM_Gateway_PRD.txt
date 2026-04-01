@@ -1,0 +1,804 @@
+
+LLM GATEWAY
+Product Requirements Document
+
+
+Enterprise-Grade Multi-Provider AI Routing Infrastructure
+Core Engine: Rust  ·  Ancillary Services: Go
+
+Version
+1.0 — Initial Release
+Status
+Draft — Pending Eng Review
+Author
+Staff Engineering
+Date
+Q2 2025
+Classification
+Confidential — Internal
+
+1. Executive Summary
+This document defines the complete product requirements for the LLM Gateway — a production-grade, multi-provider AI routing infrastructure. The gateway functions as a unified control plane sitting between all internal services and external LLM providers (OpenAI, Anthropic, AWS Bedrock, Google Vertex AI, Azure OpenAI, Mistral, Groq, Cohere, and self-hosted vLLM clusters).
+
+The architecture makes a deliberate language split: the performance-critical hot path — request normalization, semantic caching, guardrails, routing, and response streaming — is written in Rust for zero-cost abstractions and sub-millisecond P99 overhead. Supporting services — the admin API, config management, provider health monitoring, audit pipeline, and observability collector — are written in Go for development velocity and ecosystem breadth.
+
+NOTE
+This is not a demo proxy. The target is: <1 ms added P99 latency at 10,000 RPS, 99.99% availability, zero-downtime deployments, and full cost attribution across every team, workspace, and model in the organisation.
+
+1.1 Business Objectives
+	•	Vendor independence: eliminate hard dependencies on any single LLM provider. Provider migrations must require zero application-layer changes.
+	•	Cost governance: give finance and engineering leadership real-time visibility into token spend per team, per model, and per product feature. Enable hard budget enforcement.
+	•	Reliability: shield applications from provider outages via automatic failover. Provider P99 tail latencies must not propagate to end users.
+	•	Security and compliance: enforce PII redaction, prompt injection detection, and audit logging on every request. Required for SOC 2 Type II and ISO 27001.
+	•	Developer experience: internal teams call a single OpenAI-compatible endpoint. They never manage provider credentials or implement retry logic.
+
+1.2 Scope
+In Scope
+Out of Scope
+Unified OpenAI-compatible request proxy
+Fine-tuning job orchestration
+Multi-provider routing and failover
+RAG pipeline management
+Semantic caching layer
+Vector database for application use
+Token budgeting and cost attribution
+Prompt template management
+Guardrails: PII, injection, toxicity
+Model evaluation harnesses
+Virtual key management with RBAC
+Agent framework (LangChain, etc.)
+Observability: traces, metrics, costs
+End-user facing chat UI
+Admin plane: REST API + dashboard
+Model training infrastructure
+
+2. Stakeholders & Personas
+2.1 Stakeholder Map
+Role
+Interest
+Decision Authority
+VP Engineering
+Cost control, vendor risk, reliability SLAs
+Programme go/no-go
+Staff Engineer (owner)
+Architecture, performance, maintainability
+Technical design decisions
+Platform Team
+Deployment, infra cost, on-call burden
+Infrastructure sign-off
+Security / Compliance
+PII handling, audit log, access control
+Security review approval
+Product Engineering Teams
+Stable API, low latency, usage visibility
+Adoption & requirements input
+Finance
+Spend attribution, budget alerts, forecasting
+Budget approval
+ML / AI Team
+Model routing, eval hooks, experiment flags
+Model selection policy
+
+2.2 User Personas
+Persona 1 — Application Developer (daily user)
+Integrates the gateway via the provided Go/TypeScript/Python SDK or direct HTTP. Expects an OpenAI-compatible interface. Does not want to know which provider is serving the request. Needs fast, predictable latency and clear error messages when budgets are exhausted or guardrails fire.
+
+Persona 2 — Platform / SRE Engineer (operator)
+Manages deployment, scaling, on-call response, and provider credential rotation. Needs runbooks, health endpoints, clear circuit-breaker state visibility, and zero-downtime upgrade paths. Uses the Prometheus dashboard and Jaeger traces to diagnose incidents.
+
+Persona 3 — Workspace Admin (team lead)
+Manages virtual keys and budget allocations for their team. Creates routing policies (e.g. "use Claude Sonnet for drafting, GPT-4o for code review"). Monitors cost reports. Does not have access to other teams' data.
+
+Persona 4 — Security Officer (auditor)
+Reviews audit logs for PII events, access patterns, and policy violations. Needs immutable, queryable audit records. Requires evidence of PII redaction and data residency compliance for regulatory submissions.
+
+3. Architecture Overview
+3.1 Language Split Rationale
+KEY DECISION
+Critical decision: The hot path (everything a request touches before the LLM call and after the response) is Rust. Supporting infrastructure is Go. This boundary is firm — no Rust code should be introduced in admin services, and no Go code should be in the request hot path.
+
+Component
+Language
+Justification
+Request proxy core
+Rust
+Zero-copy I/O, no GC pauses, <1 ms P99 target
+Streaming SSE engine
+Rust
+Async I/O with Tokio, zero-allocation chunk forwarding
+Semantic cache (hot path)
+Rust
+In-process ONNX embedding, Qdrant client, no FFI overhead
+Guardrails engine
+Rust
+Regex + NER in tight loop; Rust regex crate is 10× faster
+Circuit breaker / router
+Rust
+Atomic state machine; lock-free counters (std::sync::atomic)
+Token budget enforcement
+Rust
+Atomic Redis Lua calls; must be consistent under concurrent load
+Admin REST API
+Go
+CRUD with Gin/Echo; rapid iteration; rich ORM ecosystem
+Config hot-reload service
+Go
+PostgreSQL LISTEN/NOTIFY + Redis pub/sub; simpler in Go
+Provider health monitor
+Go
+Background goroutines; straightforward concurrency model
+Audit event pipeline
+Go
+Kafka producer with batching; excellent Go Kafka clients
+Observability collector
+Go
+OpenTelemetry Go SDK is mature and well-maintained
+CLI / SDK tooling
+Go
+Fast compilation, single binaries, developer familiarity
+
+3.2 Component Topology
+NOTE
+Deployment topology: Clients → L4 Load Balancer → Gateway Pods (Rust binary, 3+ replicas, stateless) → [Redis, Qdrant, Postgres] + [LLM Providers]. All shared state lives in external stores. Gateway pods are cattle, not pets.
+
+3.3 Data Flow — Happy Path
+	•	Client sends POST /v1/chat/completions with a virtual API key.
+	•	Gateway validates the JWT / virtual key (Rust, in-memory cache of key metadata).
+	•	Rate-limit check against Redis sliding window (Rust + redis-rs).
+	•	Pre-call guardrail pipeline: PII scan → injection detection → topic guard.
+	•	Semantic cache lookup: embed prompt with in-process ONNX model → ANN query Qdrant.
+	•	Cache hit: return cached response with Cache-Status: HIT header. End.
+	•	Cache miss: intelligent router selects provider (circuit state, latency score, cost weight).
+	•	Request enrichment: inject trace ID, workspace metadata, model normalisation.
+	•	Forward to provider. Stream response back chunk-by-chunk (SSE passthrough).
+	•	Post-call guardrail scan on completion tokens.
+	•	Async: emit audit event to Kafka → ClickHouse; update token counters in Redis.
+	•	Store embedding + response in Qdrant (semantic cache write).
+	•	Return response to client.
+
+4. Functional Requirements
+4.1 Request Proxy Engine  
+RUST COMPONENT
+Implemented in Rust using Tokio async runtime, Hyper HTTP server, and reqwest for upstream calls.
+
+4.1.1 OpenAI-Compatible API Surface
+	•	FR-101: The gateway MUST expose POST /v1/chat/completions, POST /v1/completions, POST /v1/embeddings, and POST /v1/images/generations with request/response schemas 100% compatible with the OpenAI API specification v1.
+	•	FR-102: The gateway MUST support both streaming (stream: true, SSE) and non-streaming modes. Streaming MUST forward chunks to the client with zero buffering of the full response.
+	•	FR-103: The gateway MUST normalise provider-specific request and response formats via adapter modules. Clients always receive OpenAI-schema responses regardless of the underlying provider.
+	•	FR-104: The gateway MUST inject a unique request ID (X-Request-ID header) on every request and propagate it to the provider call and all log/trace records.
+	•	FR-105: The gateway MUST support multi-modal inputs (text + images) where the target provider supports them, passing through base64-encoded image content without modification.
+
+4.1.2 Provider Adapters
+Each adapter implements a Rust trait:
+trait ProviderAdapter: Send + Sync { fn normalize_request(...) -> ProviderRequest; fn normalize_response(...) -> OpenAIResponse; fn stream_chunk(...) -> Option<StreamChunk>; }
+	•	FR-106: Adapters MUST be implemented for: OpenAI, Anthropic Claude, AWS Bedrock (Claude + Titan + Llama variants), Google Vertex AI (Gemini), Azure OpenAI, Cohere Command, Mistral AI, Groq, and a generic OpenAI-compat adapter for vLLM / Ollama self-hosted endpoints.
+	•	FR-107: Adapters MUST translate stop sequences, temperature, top_p, max_tokens, and tool/function call schemas bidirectionally.
+	•	FR-108: The adapter registry MUST be extensible — adding a new provider requires implementing the ProviderAdapter trait and registering it; no core modification required.
+
+4.1.3 Connection Management
+	•	FR-109: The gateway MUST maintain a persistent per-provider HTTP/2 connection pool. Pool size MUST be configurable per provider (default: 50 connections).
+	•	FR-110: The gateway MUST implement a three-tier timeout: (a) time-to-first-token (TTFT) timeout, (b) total stream duration timeout, (c) provider connect timeout. All MUST be configurable per route.
+	•	FR-111: The gateway MUST validate TLS certificates for all upstream provider connections. Certificate pinning MUST be supported for self-hosted endpoints.
+
+4.2 Intelligent Router
+RUST COMPONENT
+Implemented in Rust. Lock-free atomic state per provider. Routing decisions in <50 µs.
+
+4.2.1 Route Configuration
+	•	FR-201: Operators MUST be able to define route groups with: a primary provider, up to 5 ordered fallback providers, per-provider weights (for load distribution), and allowed model overrides.
+	•	FR-202: Route configs MUST support model aliasing — clients can call model: "production-fast" and the gateway resolves it to gpt-4o-mini or claude-haiku based on the active routing policy.
+	•	FR-203: Routing decisions MUST be deterministic and auditable — the chosen provider and reason (primary / weight / failover / budget) MUST appear in every trace.
+
+4.2.2 Circuit Breaker
+	•	FR-204: Each provider MUST have an independent circuit breaker with three states: Closed (normal), Half-Open (recovery probe), and Open (failed).
+	•	FR-205: Circuit open conditions (all configurable): error rate > threshold over a rolling 60-second window, or consecutive failure count > N.
+	•	FR-206: In Open state, the router MUST skip the provider entirely and choose the next-best fallback. If all providers are Open, return HTTP 503 with Retry-After.
+	•	FR-207: In Half-Open state, the router MUST route 5% of traffic to probe recovery. On 2 consecutive successes, transition to Closed. On any failure, return to Open.
+	•	FR-208: Circuit breaker state MUST be stored in process memory (AtomicU8) — not Redis — to avoid adding I/O on the hot path. State is per-instance (acceptable eventual consistency).
+
+4.2.3 Load Distribution & Scoring
+	•	FR-209: When multiple providers are healthy, the router MUST score each candidate using: current observed P95 latency (EWMA), cost per 1K output tokens (configurable), current circuit state, and explicit operator-set weight.
+	•	FR-210: The gateway MUST support multi-key load distribution per provider — if a workspace has registered 5 API keys for OpenAI, requests MUST be distributed across them with per-key rate-limit tracking.
+
+4.2.4 Retry Policy
+	•	FR-211: The gateway MUST retry on: HTTP 429 (Rate Limited), HTTP 503, HTTP 524 (Timeout), and TCP connection errors. It MUST NOT retry on 4xx client errors (400, 401, 403, 404, 422).
+	•	FR-212: Retries MUST use exponential backoff with full jitter. If the provider returns Retry-After, that value MUST be respected as the minimum backoff.
+	•	FR-213: Max retries MUST be configurable per route (default: 3). Each retry SHOULD attempt the next provider in the fallback chain rather than the same failed provider.
+
+4.3 Semantic Cache
+RUST COMPONENT
+Hot path implemented in Rust. Embedding via in-process ONNX Runtime (no remote call). Vector store: Qdrant. Cold cache metadata in Redis.
+
+4.3.1 Cache Lookup
+	•	FR-301: On every non-streaming request, the gateway MUST perform a semantic cache lookup before forwarding to the provider.
+	•	FR-302: The cache lookup MUST embed the canonical prompt using an in-process embedding model (all-MiniLM-L6-v2 via ONNX Runtime). The embedding call MUST complete in <5 ms at P99.
+	•	FR-303: The gateway MUST query Qdrant for the top-3 nearest neighbours. If the closest neighbour has cosine similarity ≥ threshold (default: 0.93, configurable per workspace), it is a cache hit.
+	•	FR-304: Cache hits MUST return the stored response with headers: X-Cache: HIT, X-Cache-Score: <similarity>, X-Cache-Age: <seconds>.
+	•	FR-305: Cache misses MUST proceed to provider call. After a successful response, the gateway MUST asynchronously store the embedding + response in Qdrant (non-blocking write, background task).
+
+4.3.2 Cache Scoping & Isolation
+	•	FR-306: Cache entries MUST be scoped to a (workspace_id, model_name, system_prompt_hash) namespace. Workspace A MUST never receive a cached response from Workspace B's traffic.
+	•	FR-307: Each cache entry MUST carry a model_version tag. When the gateway config references a model version change, all entries for that model MUST be invalidated.
+	•	FR-308: Cache entries MUST have a configurable TTL (default: 24 hours). Entries with temperature > 0.3 SHOULD have a reduced TTL (default: 1 hour) since responses are non-deterministic.
+
+4.3.3 Cache Bypass & Invalidation
+	•	FR-309: Clients MUST be able to bypass the cache by sending Cache-Control: no-cache or X-LLM-Cache-Bypass: true.
+	•	FR-310: Admin API MUST support: flush entire workspace cache, flush by model, flush by tag, and flush by time range.
+	•	FR-311: Cache warming: on gateway startup, the system MUST pre-populate the Qdrant index from the last 7 days of high-frequency prompt embeddings stored in ClickHouse.
+
+4.4 Guardrails Engine
+RUST COMPONENT
+Implemented in Rust as a composable middleware pipeline. Each guardrail is a trait object with a uniform interface. Pipeline stages run in series; any stage can short-circuit the request.
+
+4.4.1 Pre-Call Guardrails (Request Scanning)
+	•	FR-401 — PII Detector: MUST detect and optionally redact: SSNs, credit/debit card numbers, phone numbers (international formats), email addresses, US/Indian/EU passport numbers, bank account numbers, and IP addresses. Detection via compiled Rust regex + optional NER model (configurable). On detection: log PII event, redact tokens to [REDACTED_<TYPE>], or block request (configurable per workspace policy).
+	•	FR-402 — Prompt Injection Detector: MUST score incoming prompts against a maintained pattern library of jailbreak and injection techniques (DAN, "ignore all previous instructions", role confusion, etc.). Score MUST be produced using both regex matching and semantic similarity to known attack embeddings. Configurable threshold for block vs. flag-only action.
+	•	FR-403 — Topic / Scope Guard: Workspace admins MUST be able to define a scope description (free text). The guardrail classifies incoming prompts against this scope using a zero-shot classification model. Off-scope requests return HTTP 403 with a configurable deflection message.
+	•	FR-404 — Content Policy Filter: MUST support workspace-level allow/deny lists (exact match and glob patterns). A global policy layer applies to all workspaces and cannot be overridden by workspace admins.
+	•	FR-405 — Agent Loop Detector: For requests carrying a session_id, the gateway MUST track the tool call chain depth. When depth exceeds a configurable limit (default: 20 tool calls), the gateway MUST terminate the session and return a tool_loop_limit_exceeded error.
+
+4.4.2 Post-Call Guardrails (Response Scanning)
+	•	FR-406 — PII Leak Detector: MUST apply the same PII detection pipeline to LLM completions. PII appearing in responses is treated as a leakage event, logged separately, and optionally redacted before delivery to the client.
+	•	FR-407 — Toxicity Classifier: MUST run a lightweight binary classifier on completions. Responses above the toxicity threshold MUST be blocked. The classifier MUST run in-process (no remote call) and complete in <10 ms P99.
+	•	FR-408 — Schema Validation: Workspaces using JSON mode MUST be able to register a JSON Schema. The gateway validates the completion against the schema. On validation failure: retry up to 2 times with a repair prompt, then return a structured_output_failure error.
+	•	FR-409 — Hallucination Guard: (Phase 2) For RAG-enabled use cases, the gateway MUST support a grounding check: validate that all factual claims in the completion are traceable to the provided context documents. Unsupported claims are flagged in the response metadata.
+
+4.4.3 Guardrail Pipeline Configuration
+	•	FR-410: Each workspace MUST be able to enable/disable individual guardrail stages independently.
+	•	FR-411: Guardrail execution MUST be parallelised where stages are independent (e.g., PII scan and injection detection can run concurrently).
+	•	FR-412: All guardrail actions (block, redact, flag) MUST be recorded in the audit log with: stage name, action taken, match details (hashed, not plain text for PII), and latency.
+
+4.5 Token Budgeting & Cost Governance
+RUST COMPONENT
+Enforced in Rust on the hot path using atomic Redis Lua scripts for consistency. Budget metadata managed by Go admin service.
+
+4.5.1 Budget Hierarchy
+	•	FR-501: Budget enforcement MUST support a four-level hierarchy: Organisation → Workspace → Project → Virtual Key. Limits at each level apply cumulatively (a workspace cannot exceed its org limit even if its own limit is higher).
+	•	FR-502: Budget dimensions MUST include: tokens per minute (TPM), tokens per day, tokens per month, USD cost per day, and USD cost per month.
+	•	FR-503: Budget enforcement MUST be atomic — concurrent requests MUST NOT collectively exceed a budget. Implementation: Redis INCR + Lua script (check-and-increment) executed in a single roundtrip.
+
+4.5.2 Virtual Key System
+	•	FR-504: Every client MUST authenticate using a virtual key (format: lgw_<env>_<uuid4>). Real provider API keys MUST never be exposed to application code.
+	•	FR-505: Virtual keys MUST carry: allowed_models list, max_tokens_per_request, budget_policy_id, allowed_ip_cidrs, expiry timestamp, and workspace/project tags.
+	•	FR-506: Virtual key resolution to provider credential MUST use a secrets manager integration (HashiCorp Vault, AWS Secrets Manager, or GCP Secret Manager). No credentials in environment variables or config files.
+	•	FR-507: The gateway MUST support zero-downtime key rotation: add new key → drain old key (wait for in-flight requests) → deactivate old key. Rotation MUST be triggerable via admin API or automated on a schedule.
+
+4.5.3 Budget Alerts & Enforcement
+	•	FR-508: When a budget reaches 80% consumed, the gateway MUST emit a warning event and (optionally) notify the workspace admin via webhook.
+	•	FR-509: When a budget is exhausted, the gateway MUST return HTTP 429 with X-LLM-Budget-Exhausted: true and a Retry-After timestamp indicating when the budget resets. Requests MUST be rejected, not silently truncated.
+	•	FR-510: Operators MUST be able to configure graceful degradation: instead of hard-blocking on budget exhaustion, route to a cheaper fallback model (e.g. GPT-4o → GPT-4o-mini) with budget-degraded flag in response metadata.
+
+4.6 Authentication & Access Control
+RUST COMPONENT
+Auth validation (JWT/key lookup) runs in the Rust hot path. Role and permission management is handled by the Go admin service.
+
+4.6.1 Authentication Methods
+	•	FR-601: MUST support virtual key authentication via Authorization: Bearer lgw_<env>_<uuid> header (primary method for application clients).
+	•	FR-602: MUST support JWT authentication for admin API access. JWTs MUST be RS256-signed. Public key rotation MUST be supported via JWKS endpoint.
+	•	FR-603: MUST support mTLS for service-to-service calls in zero-trust network environments (optional, configurable per route).
+
+4.6.2 RBAC Model
+Role
+Capabilities
+Scope
+Super Admin
+Full read/write on all resources. Manage orgs, workspaces, global policy, provider credentials.
+Organisation-wide
+Workspace Admin
+Manage virtual keys, budgets, routes, guardrail policy, and members within their workspace.
+Workspace-scoped
+Developer
+Create/rotate own virtual keys. View own usage and costs. Cannot modify budgets.
+Project-scoped
+Read-Only Analyst
+View logs, costs, and metrics across assigned workspaces. No write access.
+Workspace-scoped
+Audit Viewer
+Access immutable audit log and compliance exports only.
+Organisation-wide
+
+	•	FR-604: Every admin API write operation MUST produce an immutable audit record: actor identity, action, resource, before/after state, timestamp, source IP.
+	•	FR-605: IP allowlisting MUST be enforceable per virtual key. Requests from disallowed IPs MUST be rejected at the auth layer with HTTP 403.
+
+4.7 Observability
+NOTE
+Instrumentation spans both Rust (tracing crate + OpenTelemetry Rust SDK) and Go (OTel Go SDK). All telemetry is vendor-neutral via OTel collector.
+
+4.7.1 Distributed Tracing
+	•	FR-701: Every request MUST generate an OpenTelemetry trace with spans for: virtual key auth, rate-limit check, guardrail pre-scan, cache lookup, provider call (with TTFT event), guardrail post-scan, and audit write.
+	•	FR-702: Traces MUST be exported to Tempo (or Jaeger) via OTel Collector. Sampling rate MUST be configurable (default: 100% for errors, 5% for success).
+	•	FR-703: Trace context (W3C traceparent) MUST be propagated: inbound from client (if present) and outbound to provider (where supported).
+
+4.7.2 Metrics (Prometheus)
+Metric
+Type
+Labels
+llm_gateway_requests_total
+Counter
+workspace, model, provider, status_code, cache_status
+llm_gateway_request_duration_seconds
+Histogram
+provider, model, route, phase
+llm_gateway_ttft_seconds
+Histogram
+provider, model (streaming only)
+llm_gateway_tokens_total
+Counter
+workspace, model, direction (prompt/completion)
+llm_gateway_cost_usd_total
+Counter
+workspace, model, provider
+llm_gateway_cache_hit_ratio
+Gauge
+workspace, model
+llm_gateway_circuit_breaker_state
+Gauge
+provider (0=closed, 1=half-open, 2=open)
+llm_gateway_guardrail_triggers_total
+Counter
+stage, action, workspace
+llm_gateway_budget_utilisation_ratio
+Gauge
+workspace, dimension
+llm_gateway_active_connections
+Gauge
+provider
+
+4.7.3 Structured Logging
+	•	FR-704: All log output MUST be JSON-structured (no free-text format). Mandatory fields per line: trace_id, span_id, level, timestamp_utc, service, workspace_id, virtual_key_id (masked), model, provider, latency_ms.
+	•	FR-705: Log lines MUST NOT contain plaintext PII. Prompt text MUST be excluded from logs (log the prompt hash and token count, not content).
+	•	FR-706: Zero-allocation logging on the hot path is required. Use tracing crate (Rust) / zerolog (Go). No fmt.Sprintf-style string building in the request path.
+
+4.7.4 Audit Log
+	•	FR-707: Every request MUST produce an immutable audit record written to ClickHouse asynchronously (Kafka → ClickHouse consumer). Fields: request_id, timestamp, workspace_id, virtual_key_id, model, provider_used, prompt_token_count, completion_token_count, cost_usd, latency_ms, cache_hit, guardrail_actions, circuit_breaker_state, error_code.
+	•	FR-708: Audit records MUST be retained for a minimum of 13 months (SOC 2 requirement). Older records are archived to cold object storage (S3/GCS), not deleted.
+	•	FR-709: The admin API MUST expose a paginated audit log query endpoint with filters: time range, workspace, virtual key, model, guardrail action, and error code.
+
+4.8 Admin Plane
+GO COMPONENT
+Implemented in Go (Gin or Echo framework) with PostgreSQL backend. Runs as a separate Kubernetes Deployment on a distinct internal port (never exposed to the public internet).
+
+4.8.1 Admin REST API Endpoints
+Endpoint
+Method
+Description
+/admin/v1/workspaces
+GET, POST
+List and create workspaces
+/admin/v1/workspaces/{id}
+GET, PUT, DELETE
+Manage single workspace
+/admin/v1/virtual-keys
+GET, POST
+List and create virtual keys
+/admin/v1/virtual-keys/{id}/rotate
+POST
+Trigger zero-downtime key rotation
+/admin/v1/budgets
+GET, POST, PUT
+Manage budget policies
+/admin/v1/routes
+GET, POST, PUT
+Manage routing policies
+/admin/v1/guardrails
+GET, PUT
+Configure guardrail pipeline per workspace
+/admin/v1/providers
+GET, POST, PUT
+Manage provider credentials (write-only, via Vault)
+/admin/v1/audit-log
+GET
+Query audit records with filters
+/admin/v1/analytics/costs
+GET
+Cost attribution reports (daily/monthly)
+/admin/v1/analytics/usage
+GET
+Token and request usage reports
+/admin/v1/cache/flush
+POST
+Trigger cache invalidation
+/admin/v1/health/providers
+GET
+Real-time provider health and circuit state
+
+4.8.2 Config Hot-Reload
+	•	FR-801: Route configs, budget limits, and guardrail policies MUST be updatable without gateway restart.
+	•	FR-802: On config write (via admin API), the Go service MUST publish a versioned diff to a Redis pub/sub channel. Rust gateway instances subscribe and apply diffs atomically using ArcSwap (lock-free config swap).
+	•	FR-803: Config versions MUST be stored in Postgres. The gateway MUST log which config version served each request (in trace metadata).
+
+5. Non-Functional Requirements
+5.1 Performance
+Metric
+Target
+Measurement Method
+Gateway-added latency (P50)
+< 0.3 ms
+k6 load test, 10K RPS, provider mocked
+Gateway-added latency (P99)
+< 1.0 ms
+k6 load test, 10K RPS, provider mocked
+Gateway-added latency (P99.9)
+< 5.0 ms
+k6 load test, 10K RPS, provider mocked
+Semantic cache lookup (P99)
+< 5 ms (embedding + ANN query)
+In-process benchmark, Qdrant
+Guardrails pipeline (P99)
+< 15 ms (full pipeline)
+Benchmark with real prompt corpus
+Streaming TTFT added overhead
+< 0.5 ms
+Measure delta between provider TTFT and client TTFT
+Max throughput per pod (4 vCPU)
+> 5,000 RPS
+k6 sustained load, 95% success rate
+Cold start time (pod ready)
+< 2 seconds
+Kubernetes readiness probe timing
+Memory footprint per pod
+< 256 MB at idle
+Container memory metrics under no load
+
+5.2 Reliability & Availability
+	•	NFR-201: The gateway MUST maintain 99.99% availability (< 52.6 minutes downtime/year) measured monthly.
+	•	NFR-202: Provider failover MUST complete in < 100 ms from failure detection to first retry on fallback provider.
+	•	NFR-203: Zero-downtime deployments MUST be supported. Rolling update with maxSurge: 1, maxUnavailable: 0. In-flight streaming requests MUST be drained before pod termination (preStop hook, 30s grace).
+	•	NFR-204: The gateway MUST continue serving traffic (using the last known config) if Postgres or Redis becomes temporarily unavailable, for up to 60 seconds. After 60 seconds, health check MUST fail and the pod removed from load balancer rotation.
+
+5.3 Security
+	•	NFR-301: All inter-service communication MUST use TLS 1.3. mTLS is required for gateway → admin service and gateway → audit Kafka.
+	•	NFR-302: Provider API keys MUST be stored in a secrets manager. MUST NOT appear in: environment variables, application config files, container images, or logs.
+	•	NFR-303: The gateway MUST pass OWASP API Security Top 10 assessment before production deployment.
+	•	NFR-304: Dependency audit MUST run in CI. Critical CVEs MUST block deployment. cargo audit (Rust) and govulncheck (Go) MUST be included in the pipeline.
+	•	NFR-305: Data residency: the gateway MUST support routing requests to region-specific provider endpoints to comply with data residency requirements (EU data stays in EU endpoints).
+
+5.4 Scalability
+	•	NFR-401: The gateway MUST scale horizontally. Adding a pod MUST produce a proportional throughput increase (linear scaling to at least 16 pods).
+	•	NFR-402: HorizontalPodAutoscaler MUST scale on two signals: CPU utilisation (target 60%) and custom metric llm_gateway_requests_total rate (target 3,000 RPS/pod).
+	•	NFR-403: The semantic cache (Qdrant) MUST support sharding. The ANN index MUST remain performant at 10M+ cached embeddings.
+	•	NFR-404: The audit ClickHouse cluster MUST handle 50,000 audit events/second sustained ingestion without query degradation.
+
+6. Data Architecture
+6.1 Data Stores
+Store
+Technology
+Data
+Consistency Requirement
+Hot config cache
+Redis (in-memory)
+Virtual key metadata, budget counters, circuit state
+Eventual (TTL 30s)
+Budget enforcement
+Redis + Lua scripts
+Token/cost counters per key/workspace
+Strong (atomic Lua)
+Semantic cache index
+Qdrant
+Prompt embeddings + cached responses
+Eventual
+Config & RBAC
+PostgreSQL
+Workspaces, keys, routes, policies, users
+Strong (ACID)
+Audit & cost log
+ClickHouse
+Immutable request records, aggregated costs
+Append-only
+Metrics
+Prometheus (+ Thanos)
+Time-series gauge/counter/histogram
+Eventual
+Traces
+Tempo / Jaeger
+Distributed spans
+Eventual
+Secrets
+HashiCorp Vault
+Provider API keys, mTLS certs
+Strong (Raft)
+Event bus
+Kafka / Redis Streams
+Audit events, config change notifications
+At-least-once
+
+6.2 Data Privacy & Residency
+	•	DR-101: Prompt content MUST NOT be stored anywhere in the gateway infrastructure. Only the prompt's SHA-256 hash, token count, and embedding vector may be persisted.
+	•	DR-102: Completion content MUST NOT be stored except in the semantic cache (Qdrant) for cache-hit purposes. Cache entries are scoped to workspace and have configurable TTL.
+	•	DR-103: Personally Identifiable Information (PII) identified by the guardrail engine MUST be redacted from all stored records before persistence.
+	•	DR-104: For EU workspaces, requests MUST be routed to EU-region provider endpoints and all data stores (Redis, Qdrant, Postgres) MUST be deployed in EU regions.
+
+7. Testing Strategy
+7.1 Test Matrix
+Test Type
+Coverage Target
+Tool
+Runs In
+Unit tests (Rust core)
+> 85% line coverage
+cargo test + cargo-llvm-cov
+CI — every commit
+Unit tests (Go services)
+> 80% line coverage
+go test + go test -cover
+CI — every commit
+Integration tests
+All critical paths
+Docker Compose (gateway + deps)
+CI — every PR
+Contract tests (OpenAI API)
+Full spec coverage
+Pact / spec-driven
+CI — every PR
+Load tests
+10K RPS, 30 min sustained
+k6
+CI — nightly
+Chaos tests
+Provider failure, network partition
+toxiproxy + Chaos Mesh
+Weekly / pre-release
+Security tests
+OWASP API Top 10
+OWASP ZAP + cargo audit
+CI — every PR
+Performance regression
+P99 latency delta < 20%
+k6 + baseline comparison
+CI — every commit
+
+7.2 Integration Test Environment
+The integration test suite spins up a complete Docker Compose stack:
+	•	Gateway binary (Rust) — compiled in --release mode
+	•	Mock LLM provider — Go HTTP server returning canned streaming/non-streaming responses with configurable delay and error injection
+	•	Redis (single node), Qdrant (single node), PostgreSQL (single node), Kafka (single node)
+	•	Admin service (Go)
+
+Key scenarios tested in integration:
+	•	Full request lifecycle: auth → guardrails → cache miss → provider → cache write → audit
+	•	Cache hit path: second identical request returns cached response
+	•	Failover: mock primary provider returns 503 → gateway routes to fallback
+	•	Circuit breaker: 10 consecutive failures → Open state → requests bypass provider
+	•	Budget exhaustion: counter exceeds limit → 429 returned, next day counter resets
+	•	Config hot-reload: update route config via admin API → next request uses new config (< 5s)
+	•	PII redaction: prompt containing email → stored embedding has email redacted
+	•	Streaming SSE: chunked response forwarded correctly, no buffering
+
+7.3 Load Test Acceptance Criteria
+All of the following MUST pass before a production release:
+	•	Sustained 10,000 RPS for 30 minutes with < 0.1% error rate
+	•	P99 added latency (provider mocked at 0ms) remains < 1 ms throughout
+	•	Memory footprint does not grow by > 10% over 30 minutes (no memory leaks)
+	•	CPU utilisation does not exceed 70% at 5,000 RPS on a 4 vCPU pod
+	•	Semantic cache hit ratio >= 30% on a realistic prompt corpus replay
+
+8. Deployment Architecture
+8.1 Kubernetes Resources
+Resource
+Config
+Notes
+Gateway Deployment
+Min 3 replicas, 4 vCPU / 512Mi per pod
+StatelessAnti-affinity across AZs
+HorizontalPodAutoscaler
+Min 3, Max 20. Scale on CPU + custom RPS metric
+Stabilisation window: 60s scale-down
+PodDisruptionBudget
+minAvailable: 2
+Prevents full drain during node maintenance
+Service (ClusterIP)
+Port 8080 (proxy), 8081 (admin), 9090 (metrics)
+Internal only; admin never exposed externally
+ServiceMonitor
+Prometheus scrape every 15s
+Requires Prometheus Operator CRD
+ConfigMap
+Non-secret static config (timeouts, pool sizes)
+Mounted as volume; hot-reload via inotify
+Vault Agent Sidecar
+Inject provider secrets at pod startup
+Secrets mounted to /vault/secrets, not env vars
+NetworkPolicy
+Deny all ingress/egress except whitelisted
+Gateway → providers (HTTPS), Redis, Qdrant, Kafka
+
+8.2 Infrastructure as Code
+	•	IaC Tool: Terraform for cloud resources (Redis, Postgres RDS, Kafka MSK/Confluent, Qdrant managed, ClickHouse Altinity). Helm chart for Kubernetes resources.
+	•	Environments: dev (single-region, single replica), staging (multi-AZ, autoscaling), production (multi-AZ, multi-region active-active for the gateway layer).
+	•	GitOps: ArgoCD or FluxCD manages deployment state. Production requires a PR with 2 approvals + passing CI before ArgoCD syncs.
+
+8.3 Release Process
+	•	Build: cargo build --release (Rust) + go build (Go). Multi-stage Dockerfile. Final image based on distroless/static.
+	•	Scan: Trivy image scan. Block on Critical CVEs. cargo audit + govulncheck in CI.
+	•	Test: Unit → Integration → Contract → Load test gates (nightly gate must pass for weekly release).
+	•	Stage: Deploy to staging. Run smoke tests + 10-minute k6 load test against staging.
+	•	Release: Rolling update to production. maxSurge: 1, maxUnavailable: 0. Monitor P99 latency for 15 minutes post-deploy. Automated rollback if P99 > 2x baseline.
+	•	Verify: Confirm all circuit breakers in Closed state. Confirm cache hit ratio within expected range. Confirm no budget anomalies in first 10 minutes.
+
+9. Project Milestones & Phasing
+Phase
+Duration
+Deliverables
+Exit Criteria
+Phase 0 — Foundation
+2 weeks
+Monorepo setup, CI pipeline, Rust workspace skeleton, Go module structure, Docker Compose dev env, Postgres schema, Redis config, ADR documents
+CI green on all platforms; local dev env boots in < 2 min
+Phase 1 — Core Proxy
+4 weeks
+Rust proxy binary: auth, OpenAI-compat surface, provider adapters (OpenAI + Anthropic), connection pooling, streaming SSE, basic logging
+10K RPS load test passes; P99 < 2ms added latency; streaming end-to-end verified
+Phase 2 — Reliability
+3 weeks
+Circuit breaker, failover router, retry with jitter, multi-key distribution, health check subsystem, provider health API
+Failover test: primary down → fallback in < 100ms; circuit breaker opens/closes correctly
+Phase 3 — Semantic Cache
+3 weeks
+In-process ONNX embedding, Qdrant integration, cache scoping, TTL logic, bypass headers, cache warming on startup
+Cache hit on similar prompts ≥ 92% similarity threshold; P99 cache lookup < 5ms
+Phase 4 — Guardrails
+3 weeks
+PII detector, injection detector, topic guard, toxicity classifier, post-call scanning, agent loop breaker, audit log per guardrail event
+PII in test corpus detected at ≥ 98% recall; guardrail pipeline P99 < 15ms
+Phase 5 — Governance
+3 weeks
+Virtual key system, RBAC, budget enforcement (atomic Redis), cost attribution, budget alerts, secrets manager integration
+Budget enforcement: no over-spend under concurrent load; key rotation zero-downtime
+Phase 6 — Observability
+2 weeks
+OTel tracing (Rust + Go), full Prometheus metric set, Grafana dashboards, ClickHouse audit pipeline, structured logging
+All dashboards functional; trace shows end-to-end span; audit query API working
+Phase 7 — Admin Plane
+3 weeks
+Go admin REST API (all endpoints), config hot-reload, admin dashboard UI (React), provider management, audit export
+All admin endpoints pass contract tests; config update propagates < 5s
+Phase 8 — Hardening
+3 weeks
+Chaos testing, security review (OWASP), performance regression baseline, runbooks, SLO dashboards, load test CI gate
+All NFRs pass; OWASP assessment clean; load test gate in CI
+Phase 9 — Production
+2 weeks
+Multi-region deployment, Terraform finalisation, DR runbook, on-call playbook, post-launch monitoring
+Production deployment live; SLO dashboards show ≥ 99.99% availability; zero P0 incidents in first 7 days
+
+10. Risks & Mitigations
+Risk
+Severity
+Likelihood
+Mitigation
+Rust learning curve slows delivery
+Medium
+High
+Time-box Phase 1 to 4 weeks; use well-known crates (Tokio, Hyper, Axum). Establish Rust code review norms early. Go remains available for non-hot-path work.
+Qdrant ANN performance degrades at scale
+High
+Medium
+Benchmark at 1M, 5M, 10M vectors in Phase 3. Evaluate pgvector as fallback. Design cache backend as a Rust trait for easy substitution.
+Provider API schema drift breaks adapters
+Medium
+High
+Contract tests run in CI against provider spec snapshots. PagerDuty alert on adapter parse error spike. Adapter updates are isolated changes.
+Redis single point of failure for budgets
+High
+Low
+Deploy Redis in cluster mode (3 primary, 3 replica). Budget counters use Redis WAIT for durability. Fallback: disable budget enforcement on Redis unavailability (log + alert).
+Semantic cache returns stale or wrong responses
+High
+Medium
+Similarity threshold tuning (A/B test at 0.93 vs 0.95). Mandatory TTL on all entries. Cache bypass header available to all clients. Monitor cache quality via user feedback signal.
+Guardrail false positives block legitimate requests
+High
+Medium
+All guardrails default to flag-only; block mode requires explicit workspace opt-in. Provide guardrail override header for trusted internal services. Monitor false-positive rate in Grafana.
+Hot-path Rust panic crashes pod
+High
+Low
+Use catch_unwind in request handlers. Tokio task panics are isolated. Kubernetes liveness probe restarts unhealthy pods. Circuit breaker prevents traffic to crashed pods.
+
+11. Success Metrics
+11.1 Launch Criteria (Phase 9 Exit)
+	•	All NFRs in Section 5 verified by automated test suite
+	•	Zero Critical security findings in OWASP assessment
+	•	99.99% availability maintained over 7-day production pilot
+	•	P99 added latency < 1ms confirmed at 5,000 RPS production load
+	•	Semantic cache hit ratio >= 25% on production traffic within 72 hours
+	•	All provider adapters passing contract tests
+	•	Cost attribution accurate to within 1% compared to provider billing
+
+11.2 30 / 60 / 90 Day OKRs
+Milestone
+Key Result
+Metric
+30 days post-launch
+Adoption by 5+ internal product teams
+Virtual keys created by ≥ 5 distinct workspaces
+30 days post-launch
+Cost visibility established
+Finance dashboard shows 100% of LLM spend attributed
+60 days post-launch
+Cache delivering cost savings
+Semantic cache hit ratio ≥ 30%; track estimated USD saved
+60 days post-launch
+Reliability demonstrated
+Zero provider-caused P1 incidents reaching end users
+90 days post-launch
+Security posture improved
+Zero PII leakage events in audit log (post-guardrail)
+90 days post-launch
+Developer NPS
+Internal developer NPS ≥ 50 on gateway experience survey
+90 days post-launch
+Total cost reduction
+≥ 20% reduction in LLM spend vs pre-gateway baseline (cache + routing savings)
+
+12. Open Questions & Decisions Pending
+#
+Question
+Owner
+Target Date
+OQ-01
+Should the guardrail NER model run in-process (ONNX) or as a sidecar microservice? In-process is faster; sidecar is easier to update independently.
+Staff Eng + Security
+Phase 3 kick-off
+OQ-02
+Which secrets manager? HashiCorp Vault (self-managed, Kubernetes-native) vs AWS Secrets Manager (managed, simpler rotation) vs GCP Secret Manager.
+Platform Team
+Phase 5 kick-off
+OQ-03
+Qdrant self-hosted (Helm) vs Qdrant Cloud managed. Self-hosted gives control; managed reduces ops burden for Phase 3 target dates.
+Platform Team
+Phase 3 kick-off
+OQ-04
+Admin UI: build in-house (React) vs embed Grafana for dashboards + simple custom UI for key/budget management only. Build vs buy trade-off.
+Staff Eng + Product
+Phase 7 kick-off
+OQ-05
+Multi-region active-active vs active-passive for gateway deployment. Active-active requires global Redis (Upstash or Redis Enterprise); active-passive is simpler.
+Platform Team + Finance
+Phase 8 kick-off
+OQ-06
+Should hallucination guard (FR-409) use an external grounding API or an in-process model? Depends on accuracy requirements and latency budget available.
+ML Team + Staff Eng
+Phase 2 review
+OQ-07
+Kafka vs Redis Streams for the audit event bus. Kafka is durable and scalable; Redis Streams is simpler if audit volume < 10K events/sec.
+Platform Team
+Phase 0 review
+
+13. Glossary
+Term
+Definition
+ANN
+Approximate Nearest Neighbour — algorithm used by Qdrant to find semantically similar prompt embeddings
+Circuit Breaker
+Pattern that stops routing requests to a failing provider and re-tests periodically for recovery
+EWMA
+Exponentially Weighted Moving Average — used to smooth observed latency measurements for routing decisions
+FR
+Functional Requirement — a specific capability the system must provide
+Guardrail
+A middleware stage that scans or filters requests/responses against a policy
+NFR
+Non-Functional Requirement — a quality attribute (performance, availability, security)
+ONNX Runtime
+Open Neural Network Exchange Runtime — used to run embedding models in-process without Python overhead
+OTel
+OpenTelemetry — vendor-neutral observability standard for traces, metrics, and logs
+PII
+Personally Identifiable Information — any data that can identify a natural person
+Semantic Cache
+Cache that matches requests by meaning (embedding similarity) rather than exact string match
+SSE
+Server-Sent Events — HTTP streaming protocol used to forward LLM token streams to clients
+TPM
+Tokens Per Minute — a rate-limit dimension used by LLM providers and enforced by the gateway
+TTFT
+Time-To-First-Token — latency from request submission to receipt of the first completion token; key UX metric for streaming
+Virtual Key
+Gateway-issued API credential (lgw_*) that maps to a real provider credential, enabling policy enforcement without exposing secrets
+vLLM
+A high-throughput inference engine for self-hosted LLMs compatible with the OpenAI API
+
+
+LLM Gateway PRD — Version 1.0
+This document is confidential and intended for internal engineering use only.

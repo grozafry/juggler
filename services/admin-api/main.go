@@ -16,13 +16,26 @@ func main() {
 	// ── ClickHouse ──────────────────────────────────────────────────────────────
 	var ch *sql.DB
 
+	chAddr := os.Getenv("CLICKHOUSE_ADDR")
+	if chAddr == "" {
+		chAddr = "127.0.0.1:9000"
+	}
+	chUser := os.Getenv("CLICKHOUSE_USER")
+	if chUser == "" {
+		chUser = "juggler"
+	}
+	chPass := os.Getenv("CLICKHOUSE_PASSWORD")
+	if chPass == "" {
+		chPass = "password"
+	}
+
 	for i := 0; i < 10; i++ {
 		db := clickhouse.OpenDB(&clickhouse.Options{
-			Addr: []string{"127.0.0.1:9000"},
+			Addr: []string{chAddr},
 			Auth: clickhouse.Auth{
 				Database: "default",
-				Username: "juggler",
-				Password: "password",
+				Username: chUser,
+				Password: chPass,
 			},
 		})
 		if db.Ping() == nil {
@@ -60,6 +73,25 @@ func main() {
 		log.Println("✓ Connected to Postgres")
 	}
 
+	// ── Auth middleware ──────────────────────────────────────────────────────────
+	adminKey := os.Getenv("ADMIN_API_KEY")
+	authMiddleware := func(c *gin.Context) {
+		if adminKey == "" || adminKey == "changeme" {
+			// No key set — open access (dev mode)
+			c.Next()
+			return
+		}
+		key := c.GetHeader("X-Admin-Key")
+		if key == "" {
+			key = c.Query("admin_key")
+		}
+		if key != adminKey {
+			c.AbortWithStatusJSON(401, gin.H{"error": "unauthorized"})
+			return
+		}
+		c.Next()
+	}
+
 	// ── Router ──────────────────────────────────────────────────────────────────
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
@@ -82,6 +114,7 @@ func main() {
 	latencyHandler   := handlers.NewLatencyHandler(ch)
 
 	v1 := router.Group("/admin/v1")
+	v1.Use(authMiddleware)
 	{
 		// Analytics
 		v1.GET("/analytics/summary",  analyticsHandler.GetSummary)
