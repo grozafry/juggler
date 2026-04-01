@@ -22,6 +22,7 @@ services:
       - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d   # auto-applies schema on first boot
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U juggler -d gateway_auth"]
       interval: 5s
@@ -97,8 +98,8 @@ services:
     environment:
       - RUST_LOG=${RUST_LOG:-info}
       - KAFKA_BROKERS=redpanda:9092
-      - DATABASE_URL=postgres://juggler:password@postgres:5432/gateway_auth
       - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgres://juggler:password@postgres:5432/gateway_auth
     depends_on:
       postgres:
         condition: service_healthy

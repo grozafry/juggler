@@ -77,7 +77,8 @@ async fn main() {
 
     let audit_publisher = std::sync::Arc::new(reliability::audit::AuditPublisher::new().await);
 
-    let redis_client = redis::Client::open("redis://127.0.0.1:6380").ok();
+    let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6380".to_string());
+    let redis_client = redis::Client::open(redis_url).ok();
 
     let gemini_cb = std::sync::Arc::new(reliability::breaker::CircuitBreaker::new(
         "gemini".to_string(),
@@ -113,6 +114,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/v1/chat/completions", post(server::handlers::chat_completions))
+        .route("/health", axum::routing::get(|| async { axum::http::StatusCode::OK }))
         .with_state(state);
 
     let auth = "0.0.0.0:8080".parse::<SocketAddr>().unwrap();

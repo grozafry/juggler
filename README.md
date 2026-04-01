@@ -32,18 +32,19 @@ That's it. The gateway is now live at `http://localhost:8080`.
 
 ### Make your first request
 
-```bash
-# First: create a virtual key in the dashboard → Virtual Keys → Generate Key
-# Then use that key:
+A starter virtual key is automatically created when you first run `docker-compose up`:
 
+```bash
 curl -N -X POST http://localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer lgw_sk_<your-key>" \
+  -H "Authorization: Bearer lgw_sk_default1234567890abcdef" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "production-fast",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
 ```
+
+> **Note:** Replace the starter key with a proper one from the dashboard → Virtual Keys → Generate Key before sharing with your team.
 
 ### Point your existing app at Juggler
 
