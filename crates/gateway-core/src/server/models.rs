@@ -9,6 +9,23 @@ pub struct ChatCompletionRequest {
     pub max_tokens: Option<u32>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct GatewayConfig {
+    pub routing: RoutingConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RoutingConfig {
+    #[serde(default)]
+    pub aliases: std::collections::HashMap<String, Vec<TargetRoute>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TargetRoute {
+    pub provider: String,
+    pub weight: u32,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Message {
     pub role: String,

@@ -12,9 +12,22 @@ reqwest = { version = "0.12.4", features = ["json", "stream"] }
 futures = "0.3.30"
 uuid = { version = "1.8.0", features = ["v4"] }
 tracing = "0.1.40"
-tracing-subscriber = "0.3.18"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter", "json"] }
+tracing-opentelemetry = "0.22"
+opentelemetry = { version = "0.21", features = ["trace"] }
+opentelemetry-otlp = { version = "0.14", features = ["tonic"] }
+opentelemetry_sdk = { version = "0.21", features = ["rt-tokio"] }
+rand = "0.8"
 bytes = "1.6.0"
 tokio-stream = "0.1.15"
 async-stream = "0.3.5"
 dotenvy = "0.15"
 serde_yaml = "0.9.34"
+dashmap = "5"
+sha2 = "0.10"
+hex = "0.4"
+sqlx = { version = "0.7", features = ["postgres", "runtime-tokio", "uuid", "time"] }
+redis = { version = "0.25", features = ["tokio-comp"] }
+time = "0.3"
+rskafka = "0.5"
+chrono = "0.4"

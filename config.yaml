@@ -1,4 +1,10 @@
 routing:
   aliases:
-    production-fast: "gemini/gemini-2.5-flash"
-    production-smart: "anthropic/claude-3-5-sonnet-20240620"
+    production-fast:
+      - provider: "gemini/gemini-2.5-flash"
+        weight: 80
+      - provider: "anthropic/claude-3-haiku-20240307"
+        weight: 20
+    production-smart:
+      - provider: "anthropic/claude-3-5-sonnet-20240620"
+        weight: 100

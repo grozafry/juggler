@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Juggler — LLM Gateway</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+:root{--bg:#07070f;--s:rgba(255,255,255,.04);--sh:rgba(255,255,255,.07);--b:rgba(255,255,255,.08);--bh:rgba(255,255,255,.16);--t:#e8eaf0;--tm:rgba(232,234,240,.45);--td:rgba(232,234,240,.22);--blue:#4f8ef7;--cyan:#00d4ff;--purple:#a78bfa;--green:#34d399;--orange:#fb923c;--red:#f87171;--bg-blue:rgba(79,142,247,.12);--bg-cyan:rgba(0,212,255,.1);--bg-purple:rgba(167,139,250,.1);--bg-green:rgba(52,211,153,.1);--bg-orange:rgba(251,146,60,.1);--bg-red:rgba(248,113,113,.1);}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--t);min-height:100vh;overflow-x:hidden;}
+body::before{content:'';position:fixed;top:-20%;left:-10%;width:60%;height:60%;background:radial-gradient(ellipse,rgba(79,142,247,.05) 0%,transparent 70%);pointer-events:none;z-index:0;}
+body::after{content:'';position:fixed;bottom:-20%;right:-10%;width:50%;height:50%;background:radial-gradient(ellipse,rgba(167,139,250,.04) 0%,transparent 70%);pointer-events:none;z-index:0;}
+.layout{display:grid;grid-template-columns:214px 1fr;min-height:100vh;position:relative;z-index:1;}
+/* Sidebar */
+.sidebar{border-right:1px solid var(--b);padding:24px 12px;display:flex;flex-direction:column;position:sticky;top:0;height:100vh;background:rgba(7,7,15,.85);backdrop-filter:blur(20px);}
+.logo{display:flex;align-items:center;gap:10px;padding:4px 10px 20px;border-bottom:1px solid var(--b);margin-bottom:10px;}
+.logo-icon{width:34px;height:34px;background:linear-gradient(135deg,#4f8ef7,#00d4ff);border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:17px;box-shadow:0 0 18px rgba(79,142,247,.3);}
+.logo-name{font-size:15px;font-weight:700;letter-spacing:-.3px;}
+.logo-sub{font-size:9.5px;color:var(--td);text-transform:uppercase;letter-spacing:.6px;}
+.nav-label{font-size:10px;font-weight:600;color:var(--td);text-transform:uppercase;letter-spacing:1px;padding:10px 10px 3px;}
+.nav-item{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:7px;font-size:13px;font-weight:500;color:var(--tm);cursor:pointer;transition:all .15s;border:1px solid transparent;margin-bottom:1px;}
+.nav-item:hover{background:var(--sh);color:var(--t);border-color:var(--b);}
+.nav-item.active{background:var(--bg-blue);border-color:rgba(79,142,247,.25);color:var(--blue);}
+.nav-item svg{opacity:.7;flex-shrink:0;}
+.nav-item.active svg{opacity:1;}
+.live-dot{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 7px var(--green);animation:pulse 2s ease-in-out infinite;margin-left:auto;}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.5;transform:scale(.8);}}
+.sidebar-footer{margin-top:auto;padding:14px 10px 0;border-top:1px solid var(--b);font-size:11.5px;color:var(--td);display:flex;align-items:center;gap:7px;}
+/* Topbar */
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:11px 32px;border-bottom:1px solid var(--b);background:rgba(7,7,15,.7);backdrop-filter:blur(20px);position:sticky;top:0;z-index:10;}
+.breadcrumb{font-size:12.5px;color:var(--tm);}
+.breadcrumb span{color:var(--t);font-weight:500;}
+.topbar-right{display:flex;align-items:center;gap:10px;}
+.pill{display:flex;align-items:center;gap:6px;padding:6px 12px;background:var(--s);border:1px solid var(--b);border-radius:99px;font-size:11px;color:var(--td);}
+.pill .live-dot{margin-left:0;}
+select.ws{padding:6px 28px 6px 12px;background:var(--s) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='rgba(232,234,240,.35)' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 10px center;border:1px solid var(--b);border-radius:7px;font-size:12px;color:var(--t);font-family:'Inter',sans-serif;outline:none;cursor:pointer;appearance:none;}
+select.ws option{background:#0d0d1e;}
+/* Main */
+.main{padding:28px 32px;display:flex;flex-direction:column;gap:24px;overflow-y:auto;}
+.page{display:none;flex-direction:column;gap:24px;}
+.page.active{display:flex;}
+.page-title{font-size:22px;font-weight:700;letter-spacing:-.4px;}
+.page-sub{font-size:13px;color:var(--tm);margin-top:3px;}
+/* Cards */
+.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;}
+.stat-card{background:var(--s);border:1px solid var(--b);border-radius:14px;padding:20px 22px;position:relative;overflow:hidden;transition:all .2s;}
+.stat-card:hover{border-color:var(--bh);transform:translateY(-2px);}
+.stat-card::before{content:'';position:absolute;inset:0;border-radius:14px;opacity:0;transition:opacity .2s;}
+.stat-card:hover::before{opacity:1;}
+.sc-blue::before{background:radial-gradient(ellipse at top left,rgba(79,142,247,.12),transparent 60%);}
+.sc-cyan::before{background:radial-gradient(ellipse at top left,rgba(0,212,255,.1),transparent 60%);}
+.sc-purple::before{background:radial-gradient(ellipse at top left,rgba(167,139,250,.1),transparent 60%);}
+.sc-green::before{background:radial-gradient(ellipse at top left,rgba(52,211,153,.1),transparent 60%);}
+.stat-icon{width:38px;height:38px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:17px;margin-bottom:14px;}
+.si-blue{background:var(--bg-blue);border:1px solid rgba(79,142,247,.2);}
+.si-cyan{background:var(--bg-cyan);border:1px solid rgba(0,212,255,.2);}
+.si-purple{background:var(--bg-purple);border:1px solid rgba(167,139,250,.2);}
+.si-green{background:var(--bg-green);border:1px solid rgba(52,211,153,.2);}
+.stat-label{font-size:11px;font-weight:500;color:var(--tm);text-transform:uppercase;letter-spacing:.6px;margin-bottom:5px;}
+.stat-value{font-size:26px;font-weight:700;letter-spacing:-1px;font-family:'JetBrains Mono',monospace;}
+.sv-blue{color:var(--blue);}
+.sv-cyan{color:var(--cyan);}
+.sv-purple{color:var(--purple);}
+.sv-green{color:var(--green);}
+.stat-sub{font-size:10.5px;color:var(--td);margin-top:5px;}
+/* Card */
+.card{background:var(--s);border:1px solid var(--b);border-radius:14px;padding:22px;transition:border-color .2s;}
+.card:hover{border-color:var(--bh);}
+.card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;}
+.card-title{font-size:13.5px;font-weight:600;}
+.badge{font-size:10.5px;padding:3px 9px;border-radius:99px;font-weight:500;}
+.b-blue{background:var(--bg-blue);color:var(--blue);border:1px solid rgba(79,142,247,.25);}
+.b-green{background:var(--bg-green);color:var(--green);border:1px solid rgba(52,211,153,.25);}
+.b-purple{background:var(--bg-purple);color:var(--purple);border:1px solid rgba(167,139,250,.25);}
+.b-orange{background:var(--bg-orange);color:var(--orange);border:1px solid rgba(251,146,60,.25);}
+.b-red{background:var(--bg-red);color:var(--red);border:1px solid rgba(248,113,113,.25);}
+/* Charts */
+.charts-row{display:grid;grid-template-columns:2fr 1fr;gap:14px;}
+.chart-box{position:relative;height:190px;}
+/* Provider bars */
+.prov-list{display:flex;flex-direction:column;gap:13px;}
+.prov-row{display:flex;flex-direction:column;gap:5px;}
+.prov-meta{display:flex;align-items:center;justify-content:space-between;font-size:12.5px;}
+.prov-name{display:flex;align-items:center;gap:7px;font-weight:500;}
+.prov-stat{font-size:11px;color:var(--tm);font-family:'JetBrains Mono',monospace;}
+.bar-track{height:5px;background:rgba(255,255,255,.06);border-radius:99px;overflow:hidden;}
+.bar-fill{height:100%;border-radius:99px;transition:width .8s cubic-bezier(.4,0,.2,1);}
+.bf-blue{background:linear-gradient(90deg,#4f8ef7,#00d4ff);box-shadow:0 0 8px rgba(79,142,247,.3);}
+.bf-orange{background:linear-gradient(90deg,#fb923c,#f43f5e);box-shadow:0 0 8px rgba(251,146,60,.3);}
+.bf-purple{background:linear-gradient(90deg,#a78bfa,#ec4899);box-shadow:0 0 8px rgba(167,139,250,.3);}
+.bf-green{background:linear-gradient(90deg,#34d399,#06b6d4);box-shadow:0 0 8px rgba(52,211,153,.3);}
+/* Table */
+.tbl{width:100%;border-collapse:collapse;font-size:12.5px;}
+.tbl th{text-align:left;padding:0 10px 10px;font-size:10px;font-weight:600;color:var(--td);text-transform:uppercase;letter-spacing:.7px;border-bottom:1px solid var(--b);}
+.tbl td{padding:9px 10px;border-bottom:1px solid rgba(255,255,255,.04);vertical-align:middle;}
+.tbl tr:last-child td{border-bottom:none;}
+.tbl tr:hover td{background:var(--sh);}
+.mono{font-family:'JetBrains Mono',monospace;font-size:11px;}
+.chip{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:5px;font-size:11px;font-weight:500;}
+.chip-g{background:var(--bg-blue);color:var(--blue);border:1px solid rgba(79,142,247,.2);}
+.chip-a{background:var(--bg-orange);color:var(--orange);border:1px solid rgba(251,146,60,.2);}
+.chip-d{background:var(--s);color:var(--tm);border:1px solid var(--b);}
+.chip-ok{background:var(--bg-green);color:var(--green);border:1px solid rgba(52,211,153,.2);}
+.chip-err{background:var(--bg-red);color:var(--red);border:1px solid rgba(248,113,113,.2);}
+.scroll{max-height:300px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--b) transparent;}
+/* 2-col row */
+.two-col{display:grid;grid-template-columns:1fr 2fr;gap:14px;}
+.three-col{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;}
+/* Empty */
+.empty{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:36px 20px;color:var(--td);gap:7px;text-align:center;}
+.empty-icon{font-size:32px;}
+.empty-text{font-size:12.5px;}
+/* Key form */
+.form-row{display:grid;grid-template-columns:1fr 1fr auto;gap:10px;align-items:end;}
+.input-group{display:flex;flex-direction:column;gap:5px;}
+.input-label{font-size:11px;font-weight:500;color:var(--tm);text-transform:uppercase;letter-spacing:.5px;}
+input[type=text]{width:100%;padding:8px 12px;background:rgba(255,255,255,.06);border:1px solid var(--b);border-radius:7px;color:var(--t);font-size:13px;font-family:'Inter',sans-serif;outline:none;transition:border-color .15s;}
+input[type=text]:focus{border-color:var(--blue);}
+.btn{padding:8px 18px;border-radius:7px;font-size:13px;font-weight:600;cursor:pointer;border:none;transition:all .15s;white-space:nowrap;}
+.btn-primary{background:var(--blue);color:#fff;}
+.btn-primary:hover{background:#3d7ef5;box-shadow:0 0 20px rgba(79,142,247,.3);}
+.btn-danger{background:var(--bg-red);color:var(--red);border:1px solid rgba(248,113,113,.25);}
+.btn-danger:hover{background:rgba(248,113,113,.2);}
+.btn-sm{padding:4px 12px;font-size:11.5px;}
+/* Token reveal */
+.token-box{background:rgba(52,211,153,.08);border:1px solid rgba(52,211,153,.25);border-radius:8px;padding:14px 16px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--green);word-break:break-all;margin-top:12px;}
+.token-label{font-size:11px;color:var(--green);margin-bottom:6px;font-weight:600;}
+/* Latency bars */
+.lat-row{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,.04);}
+.lat-row:last-child{border-bottom:none;}
+.lat-prov{font-size:13px;font-weight:500;min-width:130px;}
+.lat-bar-wrap{flex:1;height:8px;background:rgba(255,255,255,.06);border-radius:99px;overflow:hidden;}
+.lat-bar{height:100%;border-radius:99px;transition:width .8s cubic-bezier(.4,0,.2,1);}
+.lat-vals{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--tm);min-width:160px;text-align:right;}
+/* Donut center */
+.donut-wrap{position:relative;display:flex;align-items:center;justify-content:center;height:180px;}
+.donut-center{position:absolute;text-align:center;pointer-events:none;}
+.donut-center-val{font-size:22px;font-weight:700;font-family:'JetBrains Mono',monospace;color:var(--t);}
+.donut-center-lbl{font-size:10px;color:var(--td);margin-top:2px;}
+</style>
+</head>
+<body>
+<div class="layout">
+<!-- Sidebar -->
+<aside class="sidebar">
+  <div class="logo">
+    <div class="logo-icon">⚡</div>
+    <div><div class="logo-name">Juggler</div><div class="logo-sub">LLM Gateway</div></div>
+  </div>
+  <div class="nav-label">Overview</div>
+  <div class="nav-item active" onclick="nav('overview',this)">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+    Dashboard<div class="live-dot"></div>
+  </div>
+  <div class="nav-label">Analytics</div>
+  <div class="nav-item" onclick="nav('volume',this)">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+    Request Volume
+  </div>
+  <div class="nav-item" onclick="nav('latency',this)">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
+    Latency
+  </div>
+  <div class="nav-item" onclick="nav('errors',this)">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    Errors
+  </div>
+  <div class="nav-label">System</div>
+  <div class="nav-item" onclick="nav('providers',this)">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+    Providers
+  </div>
+  <div class="nav-item" onclick="nav('keys',this)">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+    Virtual Keys
+  </div>
+  <div class="nav-item" onclick="nav('logs',this)">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+    Audit Logs
+  </div>
+  <div class="sidebar-footer">
+    <div class="live-dot"></div>
+    <span id="refreshLabel">Live · 30s refresh</span>
+  </div>
+</aside>
+
+<!-- Right panel -->
+<div style="display:flex;flex-direction:column;min-height:100vh;">
+  <div class="topbar">
+    <div class="breadcrumb" id="breadcrumb">Dashboard / <span>Overview</span></div>
+    <div class="topbar-right">
+      <select class="ws" id="wsSelect" onchange="refreshAll()">
+        <option value="">All Workspaces</option>
+        <option value="11111111-2222-3333-4444-555555555555">Demo Workspace</option>
+        <option value="123e4567-e89b-12d3-a456-426614174000">Test Workspace</option>
+      </select>
+      <div class="pill"><div class="live-dot"></div><span id="lastUpdated">Loading…</span></div>
+    </div>
+  </div>
+  <div class="main" id="mainContent">
+
+    <!-- PAGE: Overview -->
+    <div class="page active" id="page-overview">
+      <div><div class="page-title">Gateway Observatory</div><div class="page-sub">Real-time metrics across all providers</div></div>
+      <div class="stats-grid">
+        <div class="stat-card sc-blue"><div class="stat-icon si-blue">🔥</div><div class="stat-label">Total Requests</div><div class="stat-value sv-blue" id="s-req">—</div><div class="stat-sub">All time</div></div>
+        <div class="stat-card sc-cyan"><div class="stat-icon si-cyan">📥</div><div class="stat-label">Input Tokens</div><div class="stat-value sv-cyan" id="s-inp">—</div><div class="stat-sub">Prompt tokens sent</div></div>
+        <div class="stat-card sc-purple"><div class="stat-icon si-purple">📤</div><div class="stat-label">Output Tokens</div><div class="stat-value sv-purple" id="s-out">—</div><div class="stat-sub">Completion tokens received</div></div>
+        <div class="stat-card sc-green"><div class="stat-icon si-green">💰</div><div class="stat-label">Total Cost</div><div class="stat-value sv-green" id="s-cost">—</div><div class="stat-sub">Avg TTFB: <span id="s-ttfb">—</span></div></div>
+      </div>
+      <div class="charts-row">
+        <div class="card"><div class="card-header"><div class="card-title">Request Volume (24h)</div><div class="badge b-blue">Live</div></div><div class="chart-box"><canvas id="timelineChart"></canvas></div></div>
+        <div class="card"><div class="card-header"><div class="card-title">Provider Split</div><div class="badge b-green">Live</div></div><div class="prov-list" id="provListOverview"></div></div>
+      </div>
+      <div class="two-col">
+        <div class="card"><div class="card-header"><div class="card-title">Model Distribution</div><div class="badge b-purple">Top 6</div></div><div class="donut-wrap"><canvas id="modelsChart" width="160" height="160"></canvas><div class="donut-center"><div class="donut-center-val" id="donutTotal">—</div><div class="donut-center-lbl">Models</div></div></div></div>
+        <div class="card"><div class="card-header"><div class="card-title">Recent Requests</div><div class="badge b-blue">Latest 20</div></div><div class="scroll"><table class="tbl"><thead><tr><th>ID</th><th>Provider</th><th>Model</th><th>Latency</th><th>Status</th><th>Time</th></tr></thead><tbody id="logBodyOverview"></tbody></table></div></div>
+      </div>
+    </div>
+
+    <!-- PAGE: Volume -->
+    <div class="page" id="page-volume">
+      <div><div class="page-title">Request Volume</div><div class="page-sub">Hourly breakdown of gateway traffic</div></div>
+      <div class="card"><div class="card-header"><div class="card-title">Requests & Tokens (24h)</div><div class="badge b-blue">Hourly</div></div><div class="chart-box" style="height:260px"><canvas id="volumeChart"></canvas></div></div>
+      <div class="stats-grid">
+        <div class="stat-card sc-blue"><div class="stat-icon si-blue">📈</div><div class="stat-label">Total Requests</div><div class="stat-value sv-blue" id="v-req">—</div></div>
+        <div class="stat-card sc-cyan"><div class="stat-icon si-cyan">🔤</div><div class="stat-label">Total Tokens</div><div class="stat-value sv-cyan" id="v-tok">—</div></div>
+        <div class="stat-card sc-purple"><div class="stat-icon si-purple">⚡</div><div class="stat-label">Avg Latency</div><div class="stat-value sv-purple" id="v-lat">—</div></div>
+        <div class="stat-card sc-green"><div class="stat-icon si-green">💰</div><div class="stat-label">Total Cost</div><div class="stat-value sv-green" id="v-cost">—</div></div>
+      </div>
+    </div>
+
+    <!-- PAGE: Latency -->
+    <div class="page" id="page-latency">
+      <div><div class="page-title">Latency Analysis</div><div class="page-sub">P50 / P95 response times per provider</div></div>
+      <div class="card"><div class="card-header"><div class="card-title">Provider Latency Breakdown</div><div class="badge b-purple">TTFB / Stream / Total</div></div><div id="latencyList"><div class="empty"><div class="empty-icon">⏱</div><div class="empty-text">Loading latency data…</div></div></div></div>
+      <div class="card"><div class="card-header"><div class="card-title">Latency Distribution</div><div class="badge b-blue">Providers</div></div><div class="chart-box" style="height:220px"><canvas id="latencyChart"></canvas></div></div>
+    </div>
+
+    <!-- PAGE: Errors -->
+    <div class="page" id="page-errors">
+      <div><div class="page-title">Error Analysis</div><div class="page-sub">Failed requests and error codes</div></div>
+      <div class="card"><div class="card-header"><div class="card-title">Error Breakdown</div><div class="badge b-red">By Code</div></div><div class="scroll"><table class="tbl"><thead><tr><th>Error Code</th><th>Provider</th><th>Occurrences</th></tr></thead><tbody id="errorBody"></tbody></table></div></div>
+    </div>
+
+    <!-- PAGE: Providers -->
+    <div class="page" id="page-providers">
+      <div><div class="page-title">Provider Health</div><div class="page-sub">Traffic distribution and performance per provider</div></div>
+      <div class="three-col" id="providerCards"></div>
+      <div class="card"><div class="card-header"><div class="card-title">Provider Traffic Over Time</div><div class="badge b-blue">24h</div></div><div class="chart-box" style="height:220px"><canvas id="providerChart"></canvas></div></div>
+    </div>
+
+    <!-- PAGE: Virtual Keys -->
+    <div class="page" id="page-keys">
+      <div><div class="page-title">Virtual Keys</div><div class="page-sub">Create and manage API access tokens</div></div>
+      <div class="card">
+        <div class="card-header"><div class="card-title">Create New Key</div></div>
+        <div class="form-row">
+          <div class="input-group"><div class="input-label">Key Name</div><input type="text" id="keyName" placeholder="e.g. production-app"/></div>
+          <div class="input-group"><div class="input-label">Workspace ID</div><input type="text" id="keyWsId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"/></div>
+          <button class="btn btn-primary" onclick="createKey()">Generate Key</button>
+        </div>
+        <div id="newKeyBox" style="display:none"></div>
+      </div>
+      <div class="card"><div class="card-header"><div class="card-title">Active Keys</div><div class="badge b-green" id="keyCount">—</div></div><div class="scroll"><table class="tbl"><thead><tr><th>Name</th><th>Workspace</th><th>Created</th><th>Expires</th><th>Status</th><th>Action</th></tr></thead><tbody id="keysBody"></tbody></table></div></div>
+    </div>
+
+    <!-- PAGE: Audit Logs -->
+    <div class="page" id="page-logs">
+      <div><div class="page-title">Audit Logs</div><div class="page-sub">Full request history with tracing IDs</div></div>
+      <div class="card"><div class="card-header"><div class="card-title">Recent Requests</div><div class="badge b-blue">Last 50</div></div><div class="scroll"><table class="tbl"><thead><tr><th>Request ID</th><th>Workspace</th><th>Provider</th><th>Model</th><th>Total</th><th>TTFB</th><th>In Tok</th><th>Out Tok</th><th>Cost</th><th>Status</th><th>Time</th></tr></thead><tbody id="logBodyFull"></tbody></table></div></div>
+    </div>
+
+  </div>
+</div>
+</div>
+
+<script>
+const API = 'http://localhost:8081/admin/v1';
+let tChart, mChart, vChart, latChart, pChart;
+let currentPage = 'overview';
+
+// ── Nav ──────────────────────────────────────────────────
+function nav(page, el) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('page-'+page).classList.add('active');
+  if(el) el.classList.add('active');
+  currentPage = page;
+  const titles = {overview:'Overview',volume:'Request Volume',latency:'Latency',errors:'Errors',providers:'Providers',keys:'Virtual Keys',logs:'Audit Logs'};
+  document.getElementById('breadcrumb').innerHTML = `Dashboard / <span>${titles[page]||page}</span>`;
+  loadPage(page);
+}
+
+// ── Format ───────────────────────────────────────────────
+const fmtN = n => { if(!n&&n!==0)return'—'; if(n>=1e9)return(n/1e9).toFixed(2)+'B'; if(n>=1e6)return(n/1e6).toFixed(2)+'M'; if(n>=1e3)return(n/1e3).toFixed(1)+'k'; return n.toLocaleString(); };
+const fmtMs = n => { if(!n&&n!==0)return'—ms'; if(n>=1000)return(n/1000).toFixed(1)+'s'; return Math.round(n)+'ms'; };
+const fmtCost = c => { if(!c&&c!==0)return'$0.00'; return '$'+(c<0.001?'0.000':c.toFixed(4)); };
+const fmtTime = ts => { if(!ts)return'—'; try{const d=new Date(ts);return d.toLocaleTimeString('en-GB',{hour12:false});}catch{return ts.slice(11,19)||'—';} };
+const fmtDate = ts => { if(!ts)return'—'; try{const d=new Date(ts);return d.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'2-digit'});}catch{return ts;} };
+
+function provEmoji(p){ const k=(p||'').toLowerCase(); if(k.includes('gemini'))return'🔮'; if(k.includes('anthropic')||k.includes('claude'))return'🌊'; return'⚡'; }
+function provChip(p){ const k=(p||'').toLowerCase(); if(k.includes('gemini'))return`<span class="chip chip-g">🔮 gemini</span>`; if(k.includes('anthropic'))return`<span class="chip chip-a">🌊 anthropic</span>`; return`<span class="chip chip-d">⚡ ${p}</span>`; }
+
+// ── Fetch ─────────────────────────────────────────────────
+async function get(path){ try{ const r=await fetch(API+path); if(!r.ok)throw new Error(r.status); return await r.json(); }catch(e){ console.warn('GET',path,e); return null; } }
+async function post(path,body){ try{ const r=await fetch(API+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); return await r.json(); }catch(e){ console.warn('POST',path,e); return null; } }
+async function del(path){ try{ const r=await fetch(API+path,{method:'DELETE'}); return await r.json(); }catch(e){ return null; } }
+
+// ── Chart helpers ─────────────────────────────────────────
+const CHART_OPTS = { responsive:true, maintainAspectRatio:false, interaction:{mode:'index',intersect:false},
+  plugins:{ legend:{ labels:{ color:'rgba(232,234,240,.45)', font:{family:'Inter',size:11}, boxWidth:10 } }, tooltip:{ backgroundColor:'rgba(10,10,24,.95)', borderColor:'rgba(255,255,255,.1)', borderWidth:1, titleColor:'#e8eaf0', bodyColor:'rgba(232,234,240,.6)', titleFont:{family:'Inter',size:12}, bodyFont:{family:'JetBrains Mono',size:11}, padding:12, cornerRadius:8 } },
+  scales:{ x:{ ticks:{color:'rgba(232,234,240,.25)', font:{family:'JetBrains Mono',size:10}, maxTicksLimit:8}, grid:{color:'rgba(255,255,255,.04)'}, border:{display:false} }, y:{ ticks:{color:'rgba(232,234,240,.25)', font:{family:'JetBrains Mono',size:10}}, grid:{color:'rgba(255,255,255,.04)'}, border:{display:false} } }
+};
+
+// ── Summary ───────────────────────────────────────────────
+async function loadSummary() {
+  const d = await get('/analytics/summary');
+  if(!d) return;
+  document.getElementById('s-req').textContent  = fmtN(d.total_requests);
+  document.getElementById('s-inp').textContent  = fmtN(d.total_prompt_tokens);
+  document.getElementById('s-out').textContent  = fmtN(d.total_output_tokens);
+  document.getElementById('s-cost').textContent = fmtCost(d.total_cost_usd);
+  document.getElementById('s-ttfb').textContent = fmtMs(d.avg_ttfb_ms);
+  document.getElementById('v-req').textContent  = fmtN(d.total_requests);
+  document.getElementById('v-tok').textContent  = fmtN(d.total_tokens);
+  document.getElementById('v-lat').textContent  = fmtMs(d.avg_latency_ms);
+  document.getElementById('v-cost').textContent = fmtCost(d.total_cost_usd);
+}
+
+// ── Timeline ──────────────────────────────────────────────
+async function loadTimeline() {
+  const d = await get('/analytics/timeline?hours=24');
+  if(!d||!d.length) return;
+  const labels = d.map(r => { const h=new Date(r.hour); return h.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',hour12:false}); });
+  const reqs = d.map(r=>r.requests);
+  const toks = d.map(r=>r.tokens);
+
+  const setupChart = (id, chartRef, setter) => {
+    const ctx = document.getElementById(id);
+    if(!ctx) return;
+    const g = ctx.getContext('2d').createLinearGradient(0,0,0,190);
+    g.addColorStop(0,'rgba(79,142,247,.25)'); g.addColorStop(1,'rgba(79,142,247,0)');
+    if(chartRef) chartRef.destroy();
+    const c = new Chart(ctx, { type:'line', data:{ labels, datasets:[
+      {label:'Requests',data:reqs,borderColor:'#4f8ef7',backgroundColor:g,borderWidth:2,fill:true,tension:.4,pointRadius:2,pointBackgroundColor:'#4f8ef7',yAxisID:'y'},
+      {label:'Tokens',data:toks,borderColor:'#a78bfa',backgroundColor:'transparent',borderWidth:2,fill:false,tension:.4,pointRadius:2,pointBackgroundColor:'#a78bfa',yAxisID:'y1'}
+    ]}, options:{...CHART_OPTS, scales:{...CHART_OPTS.scales, y1:{position:'right',ticks:{color:'rgba(167,139,250,.35)',font:{family:'JetBrains Mono',size:10}},grid:{drawOnChartArea:false},border:{display:false}}}}});
+    setter(c);
+  };
+  setupChart('timelineChart', tChart, c=>tChart=c);
+  setupChart('volumeChart',   vChart, c=>vChart=c);
+}
+
+// ── Providers ─────────────────────────────────────────────
+async function loadProviders() {
+  const d = await get('/analytics/providers');
+  const colors = ['bf-blue','bf-orange','bf-purple','bf-green'];
+  const render = (elId) => {
+    const el = document.getElementById(elId);
+    if(!el) return;
+    if(!d||!d.length){ el.innerHTML='<div class="empty"><div class="empty-icon">📡</div><div class="empty-text">No data yet — make a request!</div></div>'; return; }
+    const total = d.reduce((s,r)=>s+r.requests,0);
+    el.innerHTML = d.map((r,i)=>{
+      const pct = total>0?Math.round(r.requests/total*100):0;
+      return `<div class="prov-row"><div class="prov-meta"><div class="prov-name">${provEmoji(r.provider)} ${r.provider}</div><div class="prov-stat">${fmtN(r.requests)} · ${pct}%</div></div><div class="bar-track"><div class="bar-fill ${colors[i%4]}" style="width:${pct}%"></div></div></div>`;
+    }).join('');
+  };
+  render('provListOverview');
+
+  // Provider cards page
+  const cards = document.getElementById('providerCards');
+  if(cards && d && d.length){
+    const cardColors = ['blue','orange','purple'];
+    cards.innerHTML = d.map((r,i)=>{
+      const color = cardColors[i%3];
+      return `<div class="stat-card sc-${color}"><div class="stat-icon si-${color}">${provEmoji(r.provider)}</div><div class="stat-label">${r.provider}</div><div class="stat-value sv-${color}">${fmtN(r.requests)}</div><div class="stat-sub">${fmtN(r.tokens)} tokens · ${fmtCost(r.cost_usd)}</div></div>`;
+    }).join('');
+  } else if(cards){
+    cards.innerHTML = '<div class="empty" style="grid-column:1/-1"><div class="empty-icon">📡</div><div class="empty-text">No provider data yet</div></div>';
+  }
+
+  // Provider timeline donut
+  if(d && d.length){
+    const ctx = document.getElementById('providerChart');
+    if(ctx){
+      if(pChart) pChart.destroy();
+      pChart = new Chart(ctx, { type:'bar', data:{ labels:d.map(r=>r.provider), datasets:[{ label:'Requests', data:d.map(r=>r.requests), backgroundColor:['rgba(79,142,247,.7)','rgba(251,146,60,.7)','rgba(167,139,250,.7)','rgba(52,211,153,.7)'], borderRadius:6 }]}, options:{...CHART_OPTS, plugins:{...CHART_OPTS.plugins, legend:{display:false}}}});
+    }
+  }
+}
+
+// ── Models donut ───────────────────────────────────────────
+async function loadModels() {
+  const d = await get('/analytics/models');
+  const ctx = document.getElementById('modelsChart');
+  if(!ctx) return;
+  if(!d||!d.length){ return; }
+  const top = d.slice(0,6);
+  if(mChart) mChart.destroy();
+  mChart = new Chart(ctx, { type:'doughnut', data:{ labels:top.map(r=>r.model.split('/').pop().split('-').slice(0,3).join('-')), datasets:[{ data:top.map(r=>r.requests), backgroundColor:['rgba(79,142,247,.8)','rgba(251,146,60,.8)','rgba(167,139,250,.8)','rgba(52,211,153,.8)','rgba(248,113,113,.8)','rgba(0,212,255,.8)'], borderColor:'rgba(7,7,15,.6)', borderWidth:3, hoverOffset:5 }]},
+    options:{ responsive:false, cutout:'65%', plugins:{ legend:{ position:'bottom', labels:{ color:'rgba(232,234,240,.4)', font:{family:'Inter',size:9}, boxWidth:8, padding:8 }}, tooltip:{...CHART_OPTS.plugins.tooltip}}}});
+  const total = top.reduce((s,r)=>s+r.requests,0);
+  document.getElementById('donutTotal').textContent = fmtN(total);
+}
+
+// ── Recent Logs ────────────────────────────────────────────
+async function loadLogs() {
+  const d = await get('/analytics/recent');
+  const renderRow = r => {
+    const status = r.error_code ? `<span class="chip chip-err">✕ ${r.error_code.replace('upstream_','')}</span>` : `<span class="chip chip-ok">✓ ok</span>`;
+    const rid = (r.request_id||'—').slice(0,8)+'…';
+    return `<tr><td><span class="mono" title="${r.request_id}">${rid}</span></td><td>${provChip(r.provider)}</td><td><span class="mono">${(r.model||'').split('/').pop()}</span></td><td><span class="mono">${fmtMs(r.latency_ms)}</span></td><td>${status}</td><td><span class="mono">${fmtTime(r.timestamp)}</span></td></tr>`;
+  };
+  const renderFull = r => {
+    const status = r.error_code ? `<span class="chip chip-err">✕ ${r.error_code.replace('upstream_','')}</span>` : `<span class="chip chip-ok">✓</span>`;
+    const rid = (r.request_id||'—').slice(0,8)+'…';
+    const cost = r.cost_usd > 0 ? `$${r.cost_usd.toFixed(5)}` : '—';
+    return `<tr><td><span class="mono" title="${r.request_id}">${rid}</span></td><td><span class="mono" style="font-size:10px">${(r.workspace_id||'—').slice(0,8)}…</span></td><td>${provChip(r.provider)}</td><td><span class="mono">${(r.model||'').split('/').pop()}</span></td><td><span class="mono">${fmtMs(r.latency_ms)}</span></td><td><span class="mono">${fmtMs(r.ttfb_ms)}</span></td><td><span class="mono">${fmtN(r.prompt_token_count)}</span></td><td><span class="mono">${fmtN(r.completion_token_count)}</span></td><td><span class="mono">${cost}</span></td><td>${status}</td><td><span class="mono">${fmtTime(r.timestamp)}</span></td></tr>`;
+  };
+
+  const empty = '<tr><td colspan="8"><div class="empty"><div class="empty-icon">📋</div><div class="empty-text">No requests yet — make your first call!</div></div></td></tr>';
+
+  const b1 = document.getElementById('logBodyOverview');
+  const b2 = document.getElementById('logBodyFull');
+  if(!d||!d.length){ if(b1) b1.innerHTML=empty; if(b2) b2.innerHTML=empty; return; }
+  if(b1) b1.innerHTML = d.slice(0,20).map(renderRow).join('');
+  if(b2) b2.innerHTML = d.map(renderFull).join('');
+}
+
+// ── Latency ────────────────────────────────────────────────
+async function loadLatency() {
+  const d = await get('/analytics/latency');
+  const el = document.getElementById('latencyList');
+  if(!el) return;
+  if(!d||!d.length){ el.innerHTML='<div class="empty"><div class="empty-icon">⏱</div><div class="empty-text">No latency data — send requests with valid API keys</div></div>'; return; }
+  const maxAvg = Math.max(...d.map(r=>r.avg_ms));
+  const provColors = {'gemini':'rgba(79,142,247,.7)','anthropic':'rgba(251,146,60,.7)'};
+  el.innerHTML = d.map(r=>{
+    const pct = maxAvg>0?Math.round(r.avg_ms/maxAvg*100):0;
+    const ttfbPct = r.avg_ms>0?Math.round(r.avg_ttfb_ms/r.avg_ms*100):0;
+    const streamPct = 100-ttfbPct;
+    const bg = provColors[r.provider]||'rgba(167,139,250,.7)';
+    return `<div class="lat-row">
+      <div class="lat-prov">${provEmoji(r.provider)} ${r.provider}</div>
+      <div style="flex:1">
+        <div style="display:flex;gap:4px;height:8px;border-radius:99px;overflow:hidden;background:rgba(255,255,255,.05)">
+          <div style="width:${ttfbPct}%;background:rgba(251,146,60,.7);" title="TTFB: ${fmtMs(r.avg_ttfb_ms)}"></div>
+          <div style="width:${streamPct}%;background:${bg};" title="Streaming: ${fmtMs(r.avg_stream_ms)}"></div>
+        </div>
+        <div style="display:flex;gap:14px;margin-top:5px;font-size:10px;font-family:JetBrains Mono,monospace;color:rgba(232,234,240,.4)">
+          <span style="color:rgba(251,146,60,.8)">⏳ TTFB ${fmtMs(r.avg_ttfb_ms)}</span>
+          <span style="color:${bg}">📡 Stream ${fmtMs(r.avg_stream_ms)}</span>
+          <span>Total ${fmtMs(r.avg_ms)}</span>
+          <span>p50 ${fmtMs(r.p50_ms)}</span>
+          <span>p95 ${fmtMs(r.p95_ms)}</span>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+
+  const ctx = document.getElementById('latencyChart');
+  if(ctx){
+    if(latChart) latChart.destroy();
+    latChart = new Chart(ctx, { type:'bar', data:{ labels:d.map(r=>r.provider), datasets:[
+      {label:'TTFB (ms)',data:d.map(r=>r.avg_ttfb_ms),backgroundColor:'rgba(251,146,60,.65)',borderRadius:6},
+      {label:'Stream (ms)',data:d.map(r=>r.avg_stream_ms),backgroundColor:'rgba(79,142,247,.65)',borderRadius:6},
+      {label:'P95 (ms)',data:d.map(r=>r.p95_ms),backgroundColor:'rgba(167,139,250,.4)',borderRadius:6,type:'line',borderColor:'rgba(167,139,250,.8)',borderWidth:2,fill:false,tension:.4}
+    ]}, options:{...CHART_OPTS, scales:{...CHART_OPTS.scales,x:{...CHART_OPTS.scales.x,stacked:true},y:{...CHART_OPTS.scales.y,stacked:true}}, plugins:{...CHART_OPTS.plugins,legend:{labels:{color:'rgba(232,234,240,.45)',font:{family:'Inter',size:11},boxWidth:10}}}}});
+  }
+}
+
+// ── Errors ────────────────────────────────────────────────
+async function loadErrors() {
+  const d = await get('/analytics/errors');
+  const el = document.getElementById('errorBody');
+  if(!el) return;
+  if(!d||!d.length){ el.innerHTML='<tr><td colspan="3"><div class="empty"><div class="empty-icon">✅</div><div class="empty-text">No errors recorded — everything is healthy!</div></div></td></tr>'; return; }
+  el.innerHTML = d.map(r=>`<tr><td><span class="chip chip-err">${r.error_code}</span></td><td>${provChip(r.provider)}</td><td><span class="mono">${r.count}</span></td></tr>`).join('');
+}
+
+// ── Virtual Keys ──────────────────────────────────────────
+async function loadKeys() {
+  const d = await get('/keys');
+  const el = document.getElementById('keysBody');
+  const cnt = document.getElementById('keyCount');
+  if(!el) return;
+  if(d === null){ el.innerHTML='<tr><td colspan="6"><div class="empty"><div class="empty-icon">🔌</div><div class="empty-text">Postgres not connected</div></div></td></tr>'; return; }
+  if(!d||!d.length){ el.innerHTML='<tr><td colspan="6"><div class="empty"><div class="empty-icon">🔑</div><div class="empty-text">No keys yet — create one above</div></div></td></tr>'; if(cnt)cnt.textContent='0 keys'; return; }
+  if(cnt) cnt.textContent = d.length+' keys';
+  el.innerHTML = d.map(k=>{
+    const status = k.revoked ? '<span class="chip chip-err">Revoked</span>' : '<span class="chip chip-ok">Active</span>';
+    const exp = k.expires_at ? fmtDate(k.expires_at) : 'Never';
+    const action = k.revoked ? '—' : `<button class="btn btn-danger btn-sm" onclick="revokeKey('${k.id}')">Revoke</button>`;
+    return `<tr><td><span style="font-weight:500">${k.name||'—'}</span></td><td><span class="mono" style="font-size:10px">${(k.workspace_id||'').slice(0,8)}…</span></td><td><span class="mono">${fmtDate(k.created_at)}</span></td><td><span class="mono">${exp}</span></td><td>${status}</td><td>${action}</td></tr>`;
+  }).join('');
+}
+
+async function createKey() {
+  const name = document.getElementById('keyName').value.trim();
+  const wsId = document.getElementById('keyWsId').value.trim();
+  if(!name||!wsId){ alert('Name and Workspace ID are required'); return; }
+  const d = await post('/keys', {name, workspace_id: wsId});
+  if(d && d.token){
+    const box = document.getElementById('newKeyBox');
+    box.style.display='block';
+    box.innerHTML=`<div class="token-box"><div class="token-label">⚠️  Copy this token — it will not be shown again</div>${d.token}</div>`;
+    document.getElementById('keyName').value='';
+    document.getElementById('keyWsId').value='';
+    loadKeys();
+  } else {
+    alert('Failed to create key: '+(d&&d.error||'Unknown error'));
+  }
+}
+
+async function revokeKey(id) {
+  if(!confirm('Revoke this key? This action cannot be undone.')) return;
+  await del('/keys/'+id);
+  loadKeys();
+}
+
+// ── Page loader ───────────────────────────────────────────
+function loadPage(p) {
+  switch(p){
+    case 'overview': loadSummary(); loadTimeline(); loadProviders(); loadModels(); loadLogs(); break;
+    case 'volume':   loadSummary(); loadTimeline(); break;
+    case 'latency':  loadLatency(); break;
+    case 'errors':   loadErrors(); break;
+    case 'providers':loadProviders(); break;
+    case 'keys':     loadKeys(); break;
+    case 'logs':     loadLogs(); break;
+  }
+}
+
+async function refreshAll() {
+  loadPage(currentPage);
+  document.getElementById('lastUpdated').textContent = 'Updated '+new Date().toLocaleTimeString('en-GB',{hour12:false});
+}
+
+// ── Init ──────────────────────────────────────────────────
+refreshAll();
+setInterval(refreshAll, 30000);
+setInterval(()=>{
+  const t=new Date();
+  document.getElementById('refreshLabel').textContent = 'Live · '+t.toLocaleTimeString('en-GB',{hour12:false});
+}, 1000);
+</script>
+</body>
+</html>
